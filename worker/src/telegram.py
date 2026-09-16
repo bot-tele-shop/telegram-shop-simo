@@ -1,6 +1,6 @@
 """Minimal Telegram Bot API client for Cloudflare Python Workers."""
 
-from http import request
+from httpclient import request
 
 
 class Telegram:

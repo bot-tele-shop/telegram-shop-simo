@@ -1,6 +1,6 @@
 """Supabase PostgREST client. The service role key stays server-side only."""
 
-from http import request
+from httpclient import request
 
 
 class DB:
