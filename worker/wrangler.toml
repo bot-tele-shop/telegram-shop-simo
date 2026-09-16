@@ -1,6 +1,6 @@
 name = "digital-shelf-bot"
 main = "src/entry.py"
-compatibility_flags = ["python_workers"]
+compatibility_flags = ["python_workers", "disable_python_external_sdk"]
 compatibility_date = "2026-09-01"
 
 # Non-sensitive config. Secrets (TELEGRAM_BOT_TOKEN, SUPABASE_SERVICE_ROLE_KEY,
