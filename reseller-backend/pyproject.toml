@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "velmora-reseller"
+version = "0.1.0"
+description = "Fail-closed offline fulfillment safety slice"
+requires-python = ">=3.12"
+dependencies = [
+  "SQLAlchemy==2.0.36",
+  "alembic==1.14.0",
+  "psycopg[binary]==3.2.3",
+  "cryptography==44.0.0",
+  "aiogram==3.15.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.4", "ruff==0.8.4"]
+
+[project.scripts]
+velmora-demo = "velmora.demo:main"
+
+[tool.setuptools.packages.find]
+include = ["velmora*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "I001", "UP010"]
