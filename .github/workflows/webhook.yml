@@ -1,0 +1,27 @@
+name: Register Telegram webhook
+
+# One-time / on-demand: points Telegram at the Cloudflare Worker.
+# Actions tab -> "Register Telegram webhook" -> Run workflow.
+on:
+  workflow_dispatch:
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set webhook and verify
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          URL="https://digital-shelf-bot.work-simo-space.workers.dev/webhook/${WEBHOOK_SECRET}"
+          echo "== getMe =="
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
+          echo; echo "== setWebhook =="
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\": \"${URL}\", \"allowed_updates\": [\"message\", \"callback_query\", \"pre_checkout_query\"], \"drop_pending_updates\": true}"
+          echo; echo "== getWebhookInfo =="
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+          echo
