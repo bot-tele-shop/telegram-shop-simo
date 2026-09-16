@@ -1,12 +1,16 @@
 name = "digital-shelf-bot"
-main = "worker/src/entry.py"
+main = "src/entry.py"
 compatibility_flags = ["python_workers"]
-compatibility_date = "2026-09-16"
+compatibility_date = "2025-06-01"
 
 # Non-sensitive config. Secrets (TELEGRAM_BOT_TOKEN, SUPABASE_SERVICE_ROLE_KEY,
 # STOCK_FERNET_KEY, WEBHOOK_SECRET, ADMIN_IDS) and variables (TERMS_TEXT,
 # PRIVACY_TEXT) are set via the "Sync Worker secrets" GitHub workflow or
-# `wrangler secret put`.
+# `wrangler secret put` (run from this directory).
+#
+# No requirements.txt here on purpose: the Worker uses only the Python Workers
+# runtime (stdlib + WebCrypto via pyodide), and Python Workers cannot be
+# deployed while a requirements.txt with packages is present.
 [vars]
 SHOP_NAME = "Digital Shelf"
 SUPABASE_URL = "https://lnaszistlucibbrcjewi.supabase.co"

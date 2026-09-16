@@ -1,2 +1,0 @@
-# Python Workers packages (Pyodide). The Worker needs none beyond the runtime:
-# Telegram and Supabase are reached over HTTP, codes are decrypted via WebCrypto.

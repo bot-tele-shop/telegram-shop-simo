@@ -73,7 +73,7 @@ def settings():
 
 @pytest.fixture(scope="module")
 def contract():
-    path = Path(__file__).resolve().parents[2] / "references/canboso-openapi-2.1.0.json"
+    path = Path(__file__).resolve().parents[1] / "references/canboso-openapi-2.1.0.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
