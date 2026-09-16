@@ -1,0 +1,32 @@
+[
+  {
+    "sku": "creator-planner-demo",
+    "title": "Creator planner - demo",
+    "description": "Sample listing for your own licensed planning template. Demo delivery is a non-redeemable sample code, not a real download.",
+    "category": "Templates",
+    "price_stars": 25,
+    "is_demo": true,
+    "source": "stock",
+    "active": true
+  },
+  {
+    "sku": "design-kit-demo",
+    "title": "Design toolkit - demo",
+    "description": "Sample listing for a digital design pack you own or are authorized to resell. Replace this listing and stock before launch.",
+    "category": "Design assets",
+    "price_stars": 50,
+    "is_demo": true,
+    "source": "stock",
+    "active": true
+  },
+  {
+    "sku": "ebook-demo",
+    "title": "Independent creator guide - demo",
+    "description": "Sample listing for an ebook. This is a test-only catalog entry, not an actual ebook or delivery promise.",
+    "category": "Ebooks",
+    "price_stars": 15,
+    "is_demo": true,
+    "source": "stock",
+    "active": true
+  }
+]
