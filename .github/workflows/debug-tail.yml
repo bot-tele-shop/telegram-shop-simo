@@ -20,17 +20,16 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           npm i wrangler@4.132.0 --no-save >/dev/null 2>&1
           (timeout 55 npx wrangler tail --format json > tail.jsonl 2>&1) &
           sleep 20
+          echo "--- firing test /start update ---"
           curl -s -X POST -H "Content-Type: application/json" \
             -d '{"update_id":999999001,"message":{"message_id":1,"from":{"id":12345},"chat":{"id":12345},"text":"/start"}}' \
-            "https://digital-shelf-bot.work-simo-space.workers.dev/webhook/${WEBHOOK_SECRET}" || true
+            "https://digital-shelf-bot.work-simo-space.workers.dev/webhook/${WEBHOOK_SECRET}"
+          echo
           sleep 25
           echo "===== TAIL ====="
-          head -c 6000 tail.jsonl || true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          head -c 8000 tail.jsonl || true
