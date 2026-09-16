@@ -1,0 +1,81 @@
+OPEN-SOURCE FOUNDATION AND REVIEW RECORD
+
+This application uses aiogram 3.31.0 as a dependency, not a fork of either shop
+repository below. No code from the two shop candidates is included in this app.
+The inspected checkouts remain separately under the workspace references folder.
+
+Reviewed on 2026-09-15:
+
+1. https://github.com/aiogram/aiogram
+   MIT license. Local inspected commit:
+   97cfe79fa0ac9459d498bdb15cb7cb0530dbaac7 (2026-08-26).
+   Application dependency pinned to published release 3.31.0, rather than main.
+   Selected as the async Telegram Bot API framework.
+
+2. https://github.com/interlumpen/Telegram-shop
+   MIT license. Local inspected commit:
+   3b354f924edfdea547d2f4e1c6234a391024130f (2026-07-27).
+   README and payment handler inspected, not a full audit. Includes a PostgreSQL
+   wallet/top-up model, Stars, fiat, CryptoPay, and a web-admin application.
+   Not selected for this small Stars-only, per-product invoice MVP. This is a
+   scope/architecture decision, not a claim that the entire project is insecure.
+
+3. https://github.com/nepogrishim562/telegram-shop
+   MIT license. Local inspected commit:
+   24faf9aa1dfd1b85ef70517bcc52b84f81793be3 (2026-06-17).
+   Inspected requirements.txt contains Python import statements rather than pip
+   dependency requirements. The pre-checkout handler unconditionally answers
+   ok=True. These concrete issues disqualify it as an unmodified shop baseline.
+   The checkout also contains .env and database files; these were not reused.
+
+Repository activity dates above are local git commit dates, not claims about
+GitHub stars, archive status, package security, or comprehensive maintenance.
+Cloned shop source was reviewed as text, not executed or installed.
+
+PAYMENT DOCUMENTATION
+https://core.telegram.org/bots/payments-stars
+https://core.telegram.org/bots/features#creating-a-bot-in-the-test-environment
+Digital goods sold inside Telegram require Stars (XTR). The app sends one invoice
+price, uses an empty provider token, validates pre-checkout, and delivers only
+after successful_payment. Telegram test and production are separate environments.
+
+CANBOSO INTEGRATION
+Public contract reviewed: Buyer API 2.1.0 (OpenAPI 3.0.3).
+https://canboso.com/api/swagger/
+https://canboso.com/api/swagger/swagger-ui-init.js
+Uses documented products and balance GETs and purchase POST only. GET buyer-key
+query parameters and POST JSON key plus Idempotency-Key follow that contract.
+No supplier order-status, refund, or sandbox endpoint was documented. Pending
+seller fulfillment requires manual verification. Uncertain purchases never trigger
+an automatic POST retry. The provider does not document a maximum-price parameter
+or idempotency retention duration; local checks cannot guarantee upstream prices.
+Merchant-selected authorized account/slot products only; upgrade_account is not
+supported. Stars are customer payments, separate from the merchant supplier wallet.
+Offline mock tests are not a live supplier/payment integration certification.
+
+DEPENDENCIES
+aiogram: MIT, https://github.com/aiogram/aiogram
+cryptography: Apache-2.0 OR BSD-3-Clause, https://github.com/pyca/cryptography
+Other installed dependencies retain their own distribution licenses. They are
+not vendored into the project source ZIP; inspect their package metadata when
+redistributing installed runtime environments.
+
+AIOGRAM MIT LICENSE
+Copyright (c) 2017 - present Alex Root Junior
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to deal in the Software
+without restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software,
+and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies
+or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+OR OTHER DEALINGS IN THE SOFTWARE.

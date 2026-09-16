@@ -1,0 +1,12 @@
+{
+  "mode": "offline simulation",
+  "network_calls": 0,
+  "checkout_currency": "XTR",
+  "payment_recorded": true,
+  "duplicate_payment_detected": true,
+  "delivered_after_payment": true,
+  "delivery_messages": 1,
+  "refund_state_tested": true,
+  "refunded_stock_quarantined": true,
+  "real_payment_or_refund": false
+}

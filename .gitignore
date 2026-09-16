@@ -1,0 +1,15 @@
+config.local.json
+.env
+.env.*
+!.env.example
+data/
+*.sqlite*
+*.db*
+*.lock
+*.log
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+stock.private.*

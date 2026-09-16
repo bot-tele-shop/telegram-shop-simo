@@ -1,0 +1,11 @@
+{
+  "page_errors": [],
+  "desktop_viewport": "1440x1120",
+  "mobile_viewport": "390x844",
+  "consent_gate": "passed",
+  "simulated_checkout": "passed",
+  "delivery_reopen": "passed",
+  "navigation_tabs": "passed",
+  "mobile_horizontal_overflow": false,
+  "note": "Browser-only illustrative preview; not a live Telegram payment test."
+}

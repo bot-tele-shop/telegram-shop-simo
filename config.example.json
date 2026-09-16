@@ -1,0 +1,22 @@
+{
+  "bot_token": "",
+  "admin_ids": [],
+  "shop_name": "Digital Shelf",
+  "support_contact": "",
+  "environment": "test",
+  "enable_sales": false,
+  "production_acknowledged": false,
+  "database_path": "data/shop-test.sqlite3",
+  "stock_encryption_key": "",
+  "terms_text": "",
+  "privacy_text": "",
+  "canboso": {
+    "enabled": false,
+    "api_key": "",
+    "allow_purchases": false,
+    "resale_authorized": false,
+    "acknowledge_price_race": false,
+    "budget_currency": "",
+    "spend_budget": "0"
+  }
+}
