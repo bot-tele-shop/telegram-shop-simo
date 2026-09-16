@@ -8,8 +8,9 @@ Runtime notes (verified against the live 2026 runtime):
   (the runtime's entrypoint helper calls `on_fetch`, not `fetch`).
 - Keep compatibility_date on the bundled-SDK track (see wrangler.toml); newer
   dates unbundle the `workers` module and require vendoring workers-py.
-- Every value coming from the JS runtime (request, env) is a JsProxy —
-  always str()/to_py() it before using it as a Python object.
+- JS values may arrive as JsProxy or already converted to Python natives
+  depending on the runtime version — use str() for scalars and convert
+  request.json() with to_py() only when needed.
 """
 
 from urllib.parse import urlparse
@@ -26,7 +27,9 @@ class Default(WorkerEntrypoint):
         expected = f"/webhook/{str(self.env.WEBHOOK_SECRET)}"
         if str(request.method) == "POST" and url.path == expected:
             try:
-                update = (await request.json()).to_py()
+                update = await request.json()
+                if hasattr(update, "to_py"):
+                    update = update.to_py()
                 await flow.handle_update(update, self.env)
             except Exception as exc:
                 # Log and still 200: bad payloads must not trigger retry storms.
