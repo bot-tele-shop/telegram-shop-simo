@@ -30,9 +30,12 @@ def test_production_requires_both_strong_webhook_secrets() -> None:
 
 
 def test_production_rejects_default_database_url() -> None:
+    # Pass the field default explicitly so a SHOP_DATABASE_URL set in the
+    # environment (CI does this) cannot leak in and satisfy the validator.
     with pytest.raises(ValidationError, match="non-default database URL"):
         Settings(
             environment="production",
+            database_url=Settings.model_fields["database_url"].default,
             webhook_path_secret="p" * 32,
             webhook_header_secret="h" * 32,
         )
