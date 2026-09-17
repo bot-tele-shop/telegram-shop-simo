@@ -8,6 +8,24 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: telegram_shop
+          POSTGRES_USER: telegram_shop
+          POSTGRES_PASSWORD: telegram_shop
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U telegram_shop -d telegram_shop"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      SHOP_ENVIRONMENT: test
+      SHOP_DATABASE_URL: postgresql+asyncpg://telegram_shop:telegram_shop@127.0.0.1:5432/telegram_shop
+      SHOP_TEST_DATABASE_URL: postgresql+asyncpg://telegram_shop:telegram_shop@127.0.0.1:5432/telegram_shop
     steps:
       - uses: actions/checkout@v4
 
@@ -21,19 +39,30 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: |
+          python -m pip install uv==0.12.3
+          uv sync --frozen --group dev
+
+      - name: Apply canonical migrations
+        run: uv run alembic upgrade head
 
       - name: Lint
-        run: ruff check shop tests worker/src tools scripts
+        run: uv run ruff check shop tests worker/src tools scripts src migrations
+
+      - name: Type check canonical application
+        run: uv run mypy src/digital_shelf
 
       - name: Test suite (includes real-WebCrypto Fernet regression tests)
-        run: python -m pytest -q
+        run: uv run python -m pytest -q
 
       - name: Worker syntax check
         run: python -m py_compile worker/src/*.py
 
       - name: Dashboard JS syntax check
         run: node --check dashboard/app.js
+
+      - name: Build canonical container
+        run: docker build --tag digital-shelf:${{ github.sha }} .
 
   deploy:
     name: Deploy Worker to Cloudflare

@@ -2,6 +2,11 @@
 
 A Telegram shop bot selling digital goods for Telegram Stars.
 
+> **Canonical migration in progress:** the existing polling and Cloudflare
+> runtimes remain unchanged while the PostgreSQL-backed application is built
+> additively. Read `PROJECT_STATE.md` before changing runtime or deployment
+> behavior. The repository is not currently launch-ready.
+
 Two runtimes, one codebase:
 
 | Path | What it is | Where it runs |

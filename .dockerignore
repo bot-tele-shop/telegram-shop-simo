@@ -1,0 +1,11 @@
+.env
+.git
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.pyc
+config.local.json
+reports
+reseller-backend
+sample
