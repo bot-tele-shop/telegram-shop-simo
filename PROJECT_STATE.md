@@ -1,10 +1,10 @@
 # Project State
 
-Last updated: 2026-09-17
+Last updated: 2026-09-18
 
 ## Current phase
 
-Phase 5 planning is complete. **Slice 0: canonical application and development runtime** from `docs/IMPLEMENTATION_PLAN.md` is in progress.
+Phase 5 planning is complete. **Slice 0: canonical application and development runtime** from `docs/IMPLEMENTATION_PLAN.md` is complete. The next canonical slice is Slice 1 (identity, users, roles and settings).
 
 Implemented and locally verified so far:
 
@@ -14,13 +14,18 @@ Implemented and locally verified so far:
 - structured secret-redacting logs
 - async SQLAlchemy/asyncpg database readiness
 - Alembic bootstrap migration against PostgreSQL
-- 759 legacy-plus-canonical tests
+- 767 legacy-plus-canonical tests (1 external database test skipped locally)
 - lint, strict type checking and dashboard JavaScript syntax
+- canonical container built successfully in GitHub CI on `main`
+- committed branch CI execution passed on GitHub Actions
 
-Still required to close Slice 0:
+Current production UI work:
 
-- canonical container build evidence
-- CI execution on the committed branch
+- `feature/complete-telegram-storefront` improves the active Cloudflare Worker menu,
+  paginated real-stock catalog, persistent quick keyboard, buyer profile totals and order filters.
+- This storefront branch is locally verified and committed. Push, PR, merge and deployment are
+  blocked because the currently authenticated GitHub account has pull access but no push access.
+- Production catalog content remains owner-managed; no products or stock are invented by code.
 
 No canonical runtime has been implemented or cut over yet. The store must not be described as launch-ready.
 
