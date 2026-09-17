@@ -2,6 +2,14 @@ name: Register Telegram webhook
 
 # One-time / on-demand: points Telegram at the Cloudflare Worker.
 # Actions tab -> "Register Telegram webhook" -> Run workflow.
+#
+# Keeps pending updates (never drops buyer payments) and authenticates the
+# webhook with Telegram's secret-token header when WEBHOOK_HEADER_SECRET is
+# configured. Rollout order for enabling the header check:
+#   1. Deploy the Worker (it accepts requests with or without the header until
+#      the WEBHOOK_HEADER_SECRET secret is synced).
+#   2. Run this workflow (Telegram starts sending the header).
+#   3. Run "Sync Worker secrets" (the Worker starts enforcing the header).
 on:
   workflow_dispatch:
 
@@ -13,15 +21,27 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_HEADER_SECRET: ${{ secrets.WEBHOOK_HEADER_SECRET }}
         run: |
           set -euo pipefail
-          URL="https://digital-shelf-bot.work-simo-space.workers.dev/webhook/${WEBHOOK_SECRET}"
+          export URL="https://digital-shelf-bot.work-simo-space.workers.dev/webhook/${WEBHOOK_SECRET}"
           echo "== getMe =="
           curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
           echo; echo "== setWebhook =="
+          python3 - <<'PY' > /tmp/webhook-body.json
+          import json, os
+          body = {
+              "url": os.environ["URL"],
+              "allowed_updates": ["message", "callback_query", "pre_checkout_query"],
+              "drop_pending_updates": False,
+          }
+          if os.environ.get("WEBHOOK_HEADER_SECRET"):
+              body["secret_token"] = os.environ["WEBHOOK_HEADER_SECRET"]
+          print(json.dumps(body))
+          PY
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
             -H "Content-Type: application/json" \
-            -d "{\"url\": \"${URL}\", \"allowed_updates\": [\"message\", \"callback_query\", \"pre_checkout_query\"], \"drop_pending_updates\": true}"
+            -d @/tmp/webhook-body.json
           echo; echo "== getWebhookInfo =="
           curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
           echo
