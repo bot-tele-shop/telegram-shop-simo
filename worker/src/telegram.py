@@ -18,8 +18,10 @@ class Telegram:
             raise RuntimeError(f"telegram {method} rejected the call")
         return data["result"]
 
-    async def send_message(self, chat_id, text, keyboard=None):
+    async def send_message(self, chat_id, text, keyboard=None, parse_mode=None):
         params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if parse_mode is not None:
+            params["parse_mode"] = parse_mode
         if keyboard:
             params["reply_markup"] = {"inline_keyboard": keyboard}
         return await self.call("sendMessage", **params)

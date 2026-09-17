@@ -26,6 +26,7 @@ from .canboso import CanbosoError, valid_email
 from .config import Settings
 from .delivery import DeliveryWorker, send_delivery
 from .store import ShopError, Store
+from .storefront import back_rows, information_text, menu_rows, welcome_text
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +182,20 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
         if user_id not in settings.admin_ids:
             raise ShopError("This action is available to shop administrators only")
 
+    async def home(message: Message) -> None:
+        await message.answer(
+            welcome_text(settings.shop_name, test_mode=settings.environment == "test",
+                         paused=not settings.enable_sales),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=menu_rows()),
+        )
+
+    async def information(message: Message, page: str, user_id: int) -> None:
+        rows = [[("🛍 Products", "cat:0"), ("📋 Orders", "orders")],
+                [("🏠 Main menu", "home")]]
+        await message.answer(information_text(page, user_id), parse_mode=None,
+                             reply_markup=keyboard(rows))
+
     async def catalog(message: Message, page: int = 0) -> None:
         products = await asyncio.to_thread(store.list_products)
         page = max(0, min(page, max(0, (len(products) - 1) // 8)))
@@ -211,6 +226,7 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
             [
                 [("My orders", "orders"), ("Support", "support")],
                 [("Terms", "terms"), ("Privacy", "privacy")],
+                [("🏠 Main menu", "home")],
             ]
         )
         mode = (
@@ -245,7 +261,8 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
         await asyncio.to_thread(store.expire_orders)
         orders = await asyncio.to_thread(store.user_orders, user_id)
         if not orders:
-            await message.answer("You have no orders yet. Use /shop to browse.")
+            await message.answer("You have no orders yet. Use /shop to browse.",
+                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=back_rows()))
             return
         rows = []
         for order in orders:
@@ -256,6 +273,7 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
                 if info["state"] in {"pending", "uncertain", "blocked", "failed"}:
                     status += " / waiting for seller"
             rows.append([(f"{order['title']} | {status}", f"o:{order['id']}")])
+        rows.append([("🏠 Main menu", "home")])
         await message.answer(
             "Your most recent orders\nOpen an order for details or to confirm a saved slot draft. "
             "For orders waiting for seller fulfillment, use /paysupport.",
@@ -352,9 +370,18 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
         else:
             await query.answer(ok=True, request_timeout=5)
 
-    @router.message(Command("start", "shop"))
+    @router.message(Command("start", "menu"))
     async def start(message: Message) -> None:
+        await home(message)
+
+    @router.message(Command("shop"))
+    async def shop(message: Message) -> None:
         await catalog(message)
+
+    @router.message(Command("profile", "offers", "payments", "referrals", "api"))
+    async def info_command(message: Message) -> None:
+        page = (message.text or "").split()[0].split("@")[0][1:]
+        await information(message, page, message.from_user.id)
 
     @router.message(Command("whoami"))
     async def whoami(message: Message) -> None:
@@ -526,7 +553,13 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
         data = call.data or ""
         message = call.message
         user_id = call.from_user.id
-        if data.startswith("cat:"):
+        if data == "home":
+            await call.answer()
+            await home(message)
+        elif data in {"profile", "offers", "payments", "referrals", "api"}:
+            await call.answer()
+            await information(message, data, user_id)
+        elif data.startswith("cat:"):
             try:
                 page = int(data[4:])
             except ValueError as exc:
@@ -544,6 +577,7 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
                     f"Merchant purchase support: {settings.support_contact}\n"
                     "Include your order ID, not your digital product key.",
                     parse_mode=None,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=back_rows()),
                 )
             else:
                 await show_orders(message, user_id)

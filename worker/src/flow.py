@@ -9,6 +9,7 @@ import uuid
 
 from db import DB
 from fernet import Fernet
+from storefront import back_rows, information_text, menu_rows, welcome_text
 from telegram import Telegram
 
 TERMS_COMMANDS = {"/terms", "/privacy"}
@@ -66,7 +67,7 @@ async def show_terms(ctx, chat_id):
     await ctx.tg.send_message(
         chat_id,
         f"Privacy notice\n\n{ctx.privacy}",
-        keyboard=[[("I accept these terms and privacy notice", f"accept:{ctx.terms_version}")]],
+        keyboard=keyboard([[("I accept these terms and privacy notice", f"accept:{ctx.terms_version}")]]),
     )
 
 
@@ -74,10 +75,35 @@ def keyboard(rows):
     return [[{"text": text, "callback_data": data} for text, data in row] for row in rows]
 
 
+async def show_home(ctx, chat_id):
+    await ctx.tg.send_message(
+        chat_id, welcome_text(ctx.shop_name), keyboard=menu_rows(), parse_mode="HTML"
+    )
+
+
+async def show_information(ctx, chat_id, user_id, page):
+    await ctx.tg.send_message(
+        chat_id, information_text(page, user_id),
+        keyboard=keyboard([[("🛍 Products", "cat:0"), ("📋 Orders", "orders")],
+                           [("🏠 Main menu", "home")]])
+    )
+
+
+async def show_support(ctx, chat_id):
+    await ctx.tg.send_message(
+        chat_id,
+        f"Purchase support: {ctx.support}\n\n"
+        "Include your order ID from /orders, not your product key or bot credentials. "
+        "The merchant handles fulfillment, disputes and refund requests, not Telegram support.",
+        keyboard=back_rows(),
+    )
+
+
 async def show_catalog(ctx, chat_id):
     products = await ctx.db.rpc("catalog_with_stock", {})
     if not products:
-        await ctx.tg.send_message(chat_id, f"{ctx.shop_name}\n\nThe catalog is empty right now.")
+        await ctx.tg.send_message(chat_id, f"{ctx.shop_name}\n\nThe catalog is empty right now.",
+                                  keyboard=back_rows())
         return
     rows = []
     lines = [f"{ctx.shop_name}\n\nChoose a digital product:"]
@@ -91,9 +117,11 @@ async def show_catalog(ctx, chat_id):
         lines.append(f"\n{p['title']} - {p['price_stars']} Stars ({availability})\n{p['description']}")
         rows.append([(f"Buy {p['title']} - {p['price_stars']} Stars", f"buy:{p['sku']}")])
     if not rows:
-        await ctx.tg.send_message(chat_id, "Everything is sold out right now. Check back soon!")
+        await ctx.tg.send_message(chat_id, "Everything is sold out right now. Check back soon!",
+                                  keyboard=back_rows())
         return
     rows.append([("Terms", "terms"), ("Privacy", "privacy")])
+    rows.append([("📋 Orders", "orders"), ("🏠 Main menu", "home")])
     await ctx.tg.send_message(chat_id, "\n".join(lines), keyboard=keyboard(rows))
 
 
@@ -249,14 +277,15 @@ async def show_orders(ctx, chat_id, user_id):
         limit=10,
     )
     if not orders:
-        await ctx.tg.send_message(chat_id, "No orders yet. Browse the shop with /shop.")
+        await ctx.tg.send_message(chat_id, "No orders yet. Browse the shop with /shop.",
+                                  keyboard=back_rows())
         return
     lines = ["Your recent orders:"]
     for o in orders:
         state = ORDER_STATES.get(o["state"], o["state"])
         lines.append(f"\n{o['id']} - {o['title']} ({o['price_stars']} Stars) - {state}")
     lines.append("\nFor orders waiting on fulfillment, use /paysupport.")
-    await ctx.tg.send_message(chat_id, "\n".join(lines))
+    await ctx.tg.send_message(chat_id, "\n".join(lines), keyboard=back_rows())
 
 
 async def handle_message(ctx, message):
@@ -269,10 +298,17 @@ async def handle_message(ctx, message):
     if message.get("refunded_payment"):
         await handle_refund(ctx, message)
         return
+    if (not user_id or message.get("chat", {}).get("type") != "private"
+            or chat_id != user_id):
+        return
     text = (message.get("text") or "").strip()
     command = text.split("@")[0].split()[0] if text else ""
-    if command in ("/start", "/shop"):
+    if command in ("/start", "/menu"):
+        await show_home(ctx, chat_id)
+    elif command == "/shop":
         await show_catalog(ctx, chat_id)
+    elif command in ("/profile", "/offers", "/payments", "/referrals", "/api"):
+        await show_information(ctx, chat_id, user_id, command[1:])
     elif command == "/terms":
         await show_terms(ctx, chat_id)
     elif command == "/privacy":
@@ -280,12 +316,7 @@ async def handle_message(ctx, message):
     elif command == "/orders":
         await show_orders(ctx, chat_id, user_id)
     elif command in ("/paysupport", "/support"):
-        await ctx.tg.send_message(
-            chat_id,
-            f"Purchase support: {ctx.support}\n\n"
-            "Include your order ID from /orders, not your product key or bot credentials. "
-            "The merchant handles fulfillment, disputes and refund requests, not Telegram support.",
-        )
+        await show_support(ctx, chat_id)
     elif command == "/whoami":
         await ctx.tg.send_message(chat_id, f"Your Telegram user ID: {user_id}")
     elif text:
@@ -296,8 +327,25 @@ async def handle_callback(ctx, callback):
     data = callback.get("data") or ""
     user_id = callback["from"]["id"]
     message = callback.get("message") or {}
-    chat_id = message.get("chat", {}).get("id", user_id)
-    if data.startswith("accept:"):
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if chat.get("type") != "private" or chat_id != user_id:
+        await ctx.tg.answer_callback(callback["id"], "Open the shop in your private chat")
+        return
+    if data in {"home", "cat:0", "orders", "support", "profile", "offers",
+                "payments", "referrals", "api"}:
+        await ctx.tg.answer_callback(callback["id"])
+        if data == "home":
+            await show_home(ctx, chat_id)
+        elif data == "cat:0":
+            await show_catalog(ctx, chat_id)
+        elif data == "orders":
+            await show_orders(ctx, chat_id, user_id)
+        elif data == "support":
+            await show_support(ctx, chat_id)
+        else:
+            await show_information(ctx, chat_id, user_id, data)
+    elif data.startswith("accept:"):
         if data[7:] != ctx.terms_version:
             await ctx.tg.answer_callback(callback["id"], "Terms changed - please review again")
             await show_terms(ctx, chat_id)
