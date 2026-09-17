@@ -2,7 +2,7 @@
 
 ## What changed
 
-The reference image is implemented as a native Telegram welcome message with an HTML quote card and green (`success`) inline buttons. The row layout is Products; Offers; Profile / Orders; Payments / Referrals; Support / API. `/start` and `/menu` open it; `/shop` still opens the existing product catalog directly.
+The storefront is a native Telegram welcome message with an HTML quote card and green (`success`) inline buttons. The live menu is Products; Orders / Profile; Payments / Support. Unimplemented Offers / Referrals / API buttons are kept as handlers (so old messages still work) but are not shown on the home keyboard. `/start` and `/menu` open it; `/shop` still opens the product catalog directly.
 
 This patch updates **both existing runtimes**, `shop/` and `worker/`. Now that the repository is available, reusing its existing catalog, payment and order handlers avoids another disconnected storefront. The experimental `reseller-backend/` PostgreSQL foundation remains separate and unchanged; its payment/storage logic has not been merged into either runtime.
 

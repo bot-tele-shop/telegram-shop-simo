@@ -155,6 +155,14 @@ class Admin:
             changes["active"] = bool(data["active"])
         if not changes:
             raise AdminError(400, "nothing to update")
+        if changes.get("active") is True and product.get("source") == "stock":
+            available = await self.db.select(
+                "stock",
+                {"sku": f"eq.{sku}", "state": "eq.available", "select": "id"},
+                limit=1,
+            )
+            if not available:
+                raise AdminError(409, "upload stock before activating this product")
         await self.db.update("products", {"sku": f"eq.{sku}"}, changes)
         await self.audit(actor, "product.update", sku, changes)
         return {"ok": True, "sku": sku, "changes": sorted(changes)}
@@ -202,6 +210,34 @@ class Admin:
                          {"accepted": len(rows), "duplicates": duplicates})
         return {"ok": True, "accepted": len(rows), "duplicates": duplicates,
                 "rejected": len(cleaned) - len(rows) - duplicates}
+
+    async def list_stock(self, actor, params):
+        sku = str(params.get("sku") or "").strip()
+        if not SKU_RE.match(sku):
+            raise AdminError(400, "choose a product SKU")
+        product = await self.db.select_one("products", {"sku": f"eq.{sku}", "select": "sku"})
+        if not product:
+            raise AdminError(404, "product not found")
+        rows = await self.db.select(
+            "stock",
+            {
+                "sku": f"eq.{sku}",
+                "select": "id,state,fingerprint,created_at,order_id",
+                "order": "created_at.desc",
+            },
+            limit=500,
+        )
+        # Fingerprints are hashes, not codes. Never return ciphertext.
+        return [
+            {
+                "id": row["id"],
+                "state": row["state"],
+                "fingerprint": str(row.get("fingerprint") or "")[:12],
+                "created_at": row.get("created_at"),
+                "assigned": bool(row.get("order_id")),
+            }
+            for row in rows
+        ]
 
     async def list_orders(self, actor, params):
         state = params.get("state") or None
@@ -300,6 +336,7 @@ ROUTES = {
     "products": ("GET", Admin.list_products),
     "products/create": ("POST", Admin.create_product),
     "products/update": ("POST", Admin.update_product),
+    "stock": ("GET", Admin.list_stock),
     "stock/upload": ("POST", Admin.upload_stock),
     "orders": ("GET", Admin.list_orders),
     "orders/resend": ("POST", Admin.resend_order),
@@ -320,7 +357,7 @@ async def handle_admin(request, env, path, query):
         return 405, {"ok": False, "error": "method not allowed"}
     actor = await admin.authorize(request)
     if method == "GET":
-        result = await handler(admin, actor, query) if path == "orders" \
+        result = await handler(admin, actor, query) if path in ("orders", "stock") \
             else await handler(admin, actor)
     else:
         result = await handler(admin, actor, await admin.body(request))

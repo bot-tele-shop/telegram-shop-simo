@@ -10,11 +10,12 @@ admin request is re-authorized server-side; a logged-out or non-owner session
 gets 401/403 and can do nothing.
 
 ## Daily flow
-1. **Products** → create (stays inactive).
-2. **Stock** → pick the SKU, paste codes/URLs (one per line, ≤500), upload.
-   Lines are encrypted in the Worker before they touch the database; the
-   dashboard only ever shows counts, never codes.
-3. **Products** → Activate. The product appears in the Telegram catalog.
+1. **Products** → New product (stays hidden from buyers).
+2. **Stock** → pick the SKU, paste or drop a `.txt` of codes/URLs (one per
+   line, ≤500), upload. Lines are encrypted in the Worker before they touch
+   the database. The dashboard shows fingerprints and states, never codes.
+3. **Products** → Activate. Activation is refused until that SKU has at
+   least one available item. Then it appears in @velmorabazaar_bot.
 4. **Orders** → search by ID/title/user, watch states:
    `delivering → delivered`, or `delivery_failed` (auto-notified; use Resend).
 5. **Resend** re-sends the SAME assigned code — never allocates new stock.
