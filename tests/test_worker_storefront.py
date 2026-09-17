@@ -38,6 +38,7 @@ def cloud(worker_modules):
                            upsert=AsyncMock()),
         shop_name='My Shop <&>', support='merchant@example.invalid',
         terms='Test terms', privacy='Test privacy', terms_version='v1',
+        checkout_paused=AsyncMock(return_value=False),
     )
 
 

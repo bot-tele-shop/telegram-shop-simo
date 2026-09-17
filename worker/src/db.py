@@ -34,3 +34,9 @@ class DB:
         return await request(
             "POST", f"{self.rest}/{table}?on_conflict={on_conflict}", headers=headers, payload=row
         )
+
+    async def update(self, table, params, row):
+        headers = dict(self.headers)
+        headers["Prefer"] = "return=minimal"
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        return await request("PATCH", f"{self.rest}/{table}?{qs}", headers=headers, payload=row)

@@ -1,7 +1,13 @@
 """Buyer flow for the Digital Shelf webhook Worker.
 
 Mirrors shop/bot.py semantics: terms gate, Stars invoices, atomic fulfillment.
-Every step is idempotent so Telegram webhook retries are always safe.
+
+Durability model:
+- Each update_id is claimed (with a lease) BEFORE processing; the claim is the
+  ack decision. Processed updates are marked done; failures are recorded.
+- Payment allocates stock and records the charge BEFORE any Telegram send, so
+  a retry always resends the same code and never allocates another item.
+- An order becomes 'delivered' only after Telegram confirms the send.
 """
 
 import hashlib
@@ -19,13 +25,18 @@ ORDER_STATES = {
     "expired": "expired",
     "cancelled": "cancelled",
     "paid": "paid",
-    "delivering": "being fulfilled by the seller",
+    "delivering": "being delivered",
     "delivered": "delivered",
-    "delivery_failed": "delivery failed",
+    "delivery_failed": "delivery failed - the seller has been notified",
     "needs_refund": "refund due",
     "refund_pending": "refund in progress",
     "refunded": "refunded",
 }
+
+
+class TransientError(RuntimeError):
+    """Retryable infrastructure failure: the webhook answers 500 so Telegram
+    redelivers the update."""
 
 
 class Ctx:
@@ -53,6 +64,12 @@ class Ctx:
             except Exception:
                 pass
 
+    async def checkout_paused(self):
+        row = await self.db.select_one(
+            "metadata", {"key": "eq.checkout_paused", "select": "value"}
+        )
+        return bool(row and row.get("value") == "true")
+
 
 async def has_accepted(ctx, user_id):
     row = await ctx.db.select_one(
@@ -76,8 +93,9 @@ def keyboard(rows):
 
 
 async def show_home(ctx, chat_id):
+    paused = await ctx.checkout_paused()
     await ctx.tg.send_message(
-        chat_id, welcome_text(ctx.shop_name), keyboard=menu_rows(), parse_mode="HTML"
+        chat_id, welcome_text(ctx.shop_name, paused=paused), keyboard=menu_rows(), parse_mode="HTML"
     )
 
 
@@ -113,7 +131,9 @@ async def show_catalog(ctx, chat_id):
                 continue
             availability = f"{p['available']} in stock"
         else:
-            availability = "fulfilled after payment"
+            # Supplier fulfillment is not deployed; such products stay hidden
+            # from buyers until the pipeline is implemented.
+            continue
         lines.append(f"\n{p['title']} - {p['price_stars']} Stars ({availability})\n{p['description']}")
         rows.append([(f"Buy {p['title']} - {p['price_stars']} Stars", f"buy:{p['sku']}")])
     if not rows:
@@ -127,6 +147,10 @@ async def show_catalog(ctx, chat_id):
 
 async def start_checkout(ctx, callback, user_id, chat_id):
     sku = callback["data"][4:]
+    if await ctx.checkout_paused():
+        await ctx.tg.answer_callback(
+            callback["id"], "Checkout is temporarily paused while the shop is being updated")
+        return
     if not await has_accepted(ctx, user_id):
         await ctx.tg.answer_callback(callback["id"], "Please read and accept the terms first")
         await show_terms(ctx, chat_id)
@@ -135,13 +159,17 @@ async def start_checkout(ctx, callback, user_id, chat_id):
     if not product or not product["active"]:
         await ctx.tg.answer_callback(callback["id"], "This product is unavailable")
         return
-    if product["source"] == "stock":
-        stock = await ctx.db.select(
-            "stock", {"sku": f"eq.{sku}", "state": "eq.available", "select": "id"}, limit=1
-        )
-        if not stock:
-            await ctx.tg.answer_callback(callback["id"], "Sold out - check back soon")
-            return
+    if product["source"] == "supplier":
+        # Reject BEFORE payment: supplier fulfillment is not deployed, so a
+        # buyer must never enter an indefinite waiting state.
+        await ctx.tg.answer_callback(callback["id"], "This item is temporarily unavailable")
+        return
+    stock = await ctx.db.select(
+        "stock", {"sku": f"eq.{sku}", "state": "eq.available", "select": "id"}, limit=1
+    )
+    if not stock:
+        await ctx.tg.answer_callback(callback["id"], "Sold out - check back soon")
+        return
     order_id = "ord_" + uuid.uuid4().hex[:24]
     await ctx.db.insert(
         "orders",
@@ -165,46 +193,79 @@ async def start_checkout(ctx, callback, user_id, chat_id):
     await ctx.tg.answer_callback(callback["id"])
 
 
+_PRE_CHECKOUT_MESSAGES = {
+    "not_found": "Order not found. Please start again.",
+    "not_payable": "This order is no longer payable.",
+    "expired": "This invoice expired. Please start a new order.",
+    "amount_mismatch": "The payment details changed. Please start again.",
+    "terms": "Please re-accept the current terms.",
+    "inactive": "This product is unavailable.",
+    "supplier_unavailable": "This item is temporarily unavailable.",
+    "out_of_stock": "Just sold out, sorry!",
+}
+
+
 async def handle_pre_checkout(ctx, query):
     query_id = query["id"]
     order_id = query.get("invoice_payload", "")
     user_id = query["from"]["id"]
-    order = await ctx.db.select_one("orders", {"id": f"eq.{order_id}", "select": "*"})
-    if not order or order["user_id"] != user_id:
-        await ctx.tg.answer_pre_checkout(query_id, False, "Order not found. Please start again.")
-        return
-    if order["state"] not in ("invoice", "checkout"):
-        await ctx.tg.answer_pre_checkout(query_id, False, "This order is no longer payable.")
-        return
-    if order["terms_version"] != ctx.terms_version:
-        await ctx.tg.answer_pre_checkout(query_id, False, "Please re-accept the current terms.")
-        return
-    product = await ctx.db.select_one(
-        "products", {"sku": f"eq.{order['sku']}", "select": "source"}
+    result = await ctx.db.rpc(
+        "pre_checkout_validate",
+        {
+            "p_order_id": order_id,
+            "p_user_id": user_id,
+            "p_amount": query.get("total_amount", 0),
+            "p_currency": query.get("currency", ""),
+            "p_terms_version": ctx.terms_version,
+        },
     )
-    if product and product["source"] == "stock":
-        stock = await ctx.db.select(
-            "stock", {"sku": f"eq.{order['sku']}", "state": "eq.available", "select": "id"}, limit=1
-        )
-        if not stock:
-            await ctx.tg.answer_pre_checkout(query_id, False, "Just sold out, sorry!")
-            return
-    await ctx.tg.answer_pre_checkout(query_id, True)
+    if result and result.get("ok"):
+        await ctx.tg.answer_pre_checkout(query_id, True)
+        return
+    reason = (result or {}).get("reason", "not_found")
+    await ctx.tg.answer_pre_checkout(
+        query_id, False, _PRE_CHECKOUT_MESSAGES.get(reason, "Please start again.")
+    )
 
 
-async def deliver_code(ctx, order_id, chat_id, user_id):
-    """Fetch the sold code for an order and send it. Safe to repeat."""
+async def _send_assigned_code(ctx, order_id, chat_id):
+    """Send the code already assigned to an order, then confirm delivery.
+
+    Safe to repeat: the stock row is bound to the order at payment time, so a
+    retry always resends the SAME code and never allocates another item.
+    Returns True once Telegram has confirmed the send.
+    """
     item = await ctx.db.select_one(
         "stock", {"order_id": f"eq.{order_id}", "select": "ciphertext"}
     )
     if not item:
-        return
+        await ctx.db.rpc(
+            "record_delivery_failure",
+            {"p_order_id": order_id, "p_error": "assigned stock missing"},
+        )
+        await ctx.notify_admins(f"DELIVERY FAILED: {order_id} - assigned stock missing")
+        return False
     code = await ctx.fernet.decrypt(item["ciphertext"])
-    await ctx.tg.send_message(
-        chat_id,
-        f"Your purchase is here!\n\nOrder: {order_id}\n\n{code}\n\n"
-        f"Keep this message private. Need help? /paysupport",
-    )
+    try:
+        await ctx.tg.send_message(
+            chat_id,
+            f"Your purchase is here!\n\nOrder: {order_id}\n\n{code}\n\n"
+            f"Keep this message private. Need help? /paysupport",
+        )
+    except Exception as exc:
+        # Failed or uncertain send: keep the assignment, record the failure,
+        # and let the recovery path (Telegram retry or dashboard resend) retry
+        # the SAME code. Never compensate by assigning fresh stock.
+        await ctx.db.rpc(
+            "record_delivery_failure",
+            {"p_order_id": order_id, "p_error": f"{type(exc).__name__}: {exc}"},
+        )
+        await ctx.notify_admins(
+            f"DELIVERY FAILED: {order_id} ({type(exc).__name__}) - resend from the dashboard"
+        )
+        return False
+    await ctx.db.rpc("confirm_delivery", {"p_order_id": order_id})
+    return True
 
 
 async def handle_payment(ctx, message):
@@ -214,7 +275,8 @@ async def handle_payment(ctx, message):
     order_id = payment.get("invoice_payload", "")
     charge_id = payment.get("telegram_payment_charge_id", "")
     amount = payment.get("total_amount", 0)
-    if payment.get("currency") != "XTR" or not order_id or not charge_id:
+    currency = payment.get("currency", "")
+    if not order_id or not charge_id:
         return
     result = await ctx.db.rpc(
         "fulfill_order",
@@ -223,6 +285,7 @@ async def handle_payment(ctx, message):
             "p_charge_id": charge_id,
             "p_user_id": user_id,
             "p_amount": amount,
+            "p_currency": currency,
         },
     )
     if not result or not result.get("ok"):
@@ -234,19 +297,31 @@ async def handle_payment(ctx, message):
                 "You are entitled to a full Stars refund - contact /paysupport.",
             )
             await ctx.notify_admins(f"OUT OF STOCK after payment: {order_id} - refund needed.")
+        elif reason == "supplier_unavailable":
+            await ctx.tg.send_message(
+                chat_id,
+                f"Payment received for {order_id}, but this item cannot be fulfilled right now. "
+                "A full Stars refund will be issued - contact /paysupport if needed.",
+            )
+            await ctx.notify_admins(f"SUPPLIER ITEM PAID but unavailable: {order_id} - refund needed.")
+        else:
+            # order_not_found / payment_mismatch / charge_conflict / bad_state:
+            # the paid event is persisted in payment_events for review — never
+            # silently discarded.
+            await ctx.tg.send_message(
+                chat_id,
+                f"We received your payment ({order_id}) but it needs a manual review. "
+                "Your Stars are safe - contact /paysupport.",
+            )
+            await ctx.notify_admins(
+                f"PAID EVENT NEEDS REVIEW: order={order_id} reason={reason} user={user_id}"
+            )
         return
     if result.get("duplicate"):
-        await deliver_code(ctx, order_id, chat_id, user_id)  # retry-safe resend
+        # Replay of an already-bound charge: resend the SAME assigned code.
+        await _send_assigned_code(ctx, order_id, chat_id)
         return
-    if result.get("supplier"):
-        await ctx.tg.send_message(
-            chat_id,
-            f"Payment confirmed for {result.get('title', 'your item')} ({order_id}).\n"
-            "The seller is fulfilling your order now - track it in /orders.",
-        )
-        await ctx.notify_admins(f"Supplier order to fulfill: {order_id}")
-        return
-    await deliver_code(ctx, order_id, chat_id, user_id)
+    await _send_assigned_code(ctx, order_id, chat_id)
 
 
 async def handle_refund(ctx, message):
@@ -256,13 +331,17 @@ async def handle_refund(ctx, message):
     amount = refund.get("total_amount", 0)
     if not charge_id:
         return
-    await ctx.db.rpc(
+    result = await ctx.db.rpc(
         "record_refund",
         {"p_charge_id": charge_id, "p_user_id": user_id, "p_amount": amount},
     )
+    if not result or not result.get("matched"):
+        await ctx.notify_admins(
+            f"UNMATCHED REFUND: charge={charge_id} user={user_id} amount={amount} - review needed"
+        )
     await ctx.tg.send_message(
         message["chat"]["id"],
-        "Your refund is recorded. The delivered code has been revoked and will not be resold.",
+        "Your refund is recorded. The delivered code has been quarantined and will not be resold.",
     )
 
 
@@ -374,18 +453,33 @@ async def handle_update(update, env):
     update_id = update.get("update_id")
     if update_id is None:
         return
-    kind = next((k for k in ("message", "callback_query", "pre_checkout_query") if k in update), "?")
-    seen = await ctx.db.select_one(
-        "update_inbox", {"update_id": f"eq.{update_id}", "select": "update_id"}
-    )
-    if seen:
+    kind = next((k for k in ("message", "callback_query", "pre_checkout_query") if k in update), "unknown")
+
+    # Durable claim BEFORE processing. The update is acknowledged only after
+    # it is safely processed or its failure is durably stored for retries.
+    claim = await ctx.db.rpc("claim_update", {"p_update_id": update_id, "p_kind": kind})
+    if claim == "done":
         return
-    if "message" in update:
-        await handle_message(ctx, update["message"])
-    elif "callback_query" in update:
-        await handle_callback(ctx, update["callback_query"])
-    elif "pre_checkout_query" in update:
-        await handle_pre_checkout(ctx, update["pre_checkout_query"])
-    # Claim only after successful processing: a crash before this point lets
-    # Telegram's retry reprocess the update (every step above is idempotent).
-    await ctx.db.rpc("claim_update", {"p_update_id": update_id, "p_kind": kind})
+    if claim == "busy":
+        raise TransientError(f"update {update_id} is already being processed")
+
+    try:
+        if "message" in update:
+            await handle_message(ctx, update["message"])
+        elif "callback_query" in update:
+            await handle_callback(ctx, update["callback_query"])
+        elif "pre_checkout_query" in update:
+            await handle_pre_checkout(ctx, update["pre_checkout_query"])
+    except Exception as exc:
+        # Record the failure durably, then surface a retryable error so
+        # Telegram redelivers. Every processing step is idempotent.
+        try:
+            await ctx.db.rpc(
+                "finish_update",
+                {"p_update_id": update_id, "p_ok": False,
+                 "p_error": f"{type(exc).__name__}: {exc}"},
+            )
+        except Exception:
+            pass
+        raise
+    await ctx.db.rpc("finish_update", {"p_update_id": update_id, "p_ok": True})
