@@ -27,3 +27,32 @@ jobs:
 
       - name: Worker syntax check
         run: python -m py_compile worker/src/*.py
+
+      - name: Dashboard checks
+        working-directory: dashboard
+        if: ${{ hashFiles(\"dashboard/package.json\") != \"\" }}
+        run: |
+          npm ci
+          npm run lint --if-present
+          npm run build
+
+  deploy:
+    name: Deploy to Cloudflare
+    # Only a trusted main-branch push whose own checks passed may deploy.
+    if: github.event_name == \"push\" && github.ref == \"refs/heads/main\"
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          wranglerVersion: "4.132.0"
+          command: deploy
