@@ -29,8 +29,8 @@ jobs:
         run: python -m py_compile worker/src/*.py
 
       - name: Dashboard checks
+        if: ${{ hashFiles('dashboard/package.json') != '' }}
         working-directory: dashboard
-        if: ${{ hashFiles(\"dashboard/package.json\") != \"\" }}
         run: |
           npm ci
           npm run lint --if-present
@@ -39,7 +39,7 @@ jobs:
   deploy:
     name: Deploy to Cloudflare
     # Only a trusted main-branch push whose own checks passed may deploy.
-    if: github.event_name == \"push\" && github.ref == \"refs/heads/main\"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     concurrency:
