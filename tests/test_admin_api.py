@@ -150,6 +150,48 @@ def test_stock_upload_encrypts_and_skips_duplicates(admin_module):
     assert "new-code-1" not in str(audit)
 
 
+def test_list_stock_omits_ciphertext(admin_module):
+    admin = make_admin(admin_module)
+    admin.db.select_one.return_value = {"sku": "s1"}
+    admin.db.select.return_value = [{
+        "id": 9, "state": "available", "fingerprint": "abcdef1234567890",
+        "created_at": "2026-09-17T00:00:00Z", "order_id": None, "ciphertext": "SECRET",
+    }]
+    result = asyncio.run(admin.list_stock("owner@example.com", {"sku": "s1"}))
+    assert result == [{
+        "id": 9, "state": "available", "fingerprint": "abcdef123456",
+        "created_at": "2026-09-17T00:00:00Z", "assigned": False,
+    }]
+    assert "SECRET" not in str(result)
+    assert "ciphertext" not in result[0]
+
+
+def test_list_stock_requires_sku(admin_module):
+    admin = make_admin(admin_module)
+    with pytest.raises(admin_module.AdminError) as e:
+        asyncio.run(admin.list_stock("owner@example.com", {}))
+    assert e.value.status == 400
+
+
+def test_activate_without_stock_rejected(admin_module):
+    admin = make_admin(admin_module)
+    admin.db.select_one.return_value = {"sku": "s1", "source": "stock"}
+    admin.db.select.return_value = []
+    with pytest.raises(admin_module.AdminError) as e:
+        asyncio.run(admin.update_product("owner@example.com", {"sku": "s1", "active": True}))
+    assert e.value.status == 409
+    admin.db.update.assert_not_awaited()
+
+
+def test_activate_with_available_stock_ok(admin_module):
+    admin = make_admin(admin_module)
+    admin.db.select_one.return_value = {"sku": "s1", "source": "stock"}
+    admin.db.select.return_value = [{"id": 1}]
+    result = asyncio.run(admin.update_product("owner@example.com", {"sku": "s1", "active": True}))
+    assert result["ok"] is True
+    admin.db.update.assert_awaited()
+
+
 def test_stock_upload_rejects_control_characters(admin_module):
     admin = make_admin(admin_module)
     admin.db.select_one.return_value = {"sku": "s1", "source": "stock"}

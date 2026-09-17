@@ -24,9 +24,9 @@ def test_start_matches_reference_layout_without_wallet(harness):
     assert 'TEST ENVIRONMENT' in response.text
     assert 'Telegram Stars' in response.text and 'USDT' not in response.text
     rows = response.reply_markup.inline_keyboard
-    assert [len(row) for row in rows] == [1, 1, 2, 2, 2]
+    assert [len(row) for row in rows] == [1, 2, 2]
     assert [[b.callback_data for b in row] for row in rows] == [
-        ['cat:0'], ['offers'], ['profile', 'orders'], ['payments', 'referrals'], ['support', 'api']
+        ['cat:0'], ['orders', 'profile'], ['payments', 'support']
     ]
     assert all(b.style == 'success' for row in rows for b in row)
     assert not any(isinstance(c, SendInvoice) for c in harness.session.calls)

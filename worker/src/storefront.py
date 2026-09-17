@@ -8,10 +8,8 @@ from html import escape
 
 MENU = (
     (("🛍 Products", "cat:0"),),
-    (("🔥 Offers", "offers"),),
-    (("👤 Profile", "profile"), ("📋 Orders", "orders")),
-    (("⭐ Payments", "payments"), ("🎁 Referrals", "referrals")),
-    (("🛟 Support", "support"), ("🔗 API", "api")),
+    (("📋 Orders", "orders"), ("👤 Profile", "profile")),
+    (("⭐ Payments", "payments"), ("🛟 Support", "support")),
 )
 
 

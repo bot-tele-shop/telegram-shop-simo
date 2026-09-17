@@ -53,7 +53,7 @@ def test_cloud_start_renders_menu_without_catalog_query(cloud):
     call = cloud.tg.send_message.call_args
     assert '<blockquote>' in call.args[1] and '&lt;&amp;&gt;' in call.args[1]
     assert call.kwargs['parse_mode'] == 'HTML'
-    assert [len(row) for row in call.kwargs['keyboard']] == [1, 1, 2, 2, 2]
+    assert [len(row) for row in call.kwargs['keyboard']] == [1, 2, 2]
     assert all(b['style'] == 'success' for row in call.kwargs['keyboard'] for b in row)
     cloud.db.rpc.assert_not_awaited()
     cloud.db.insert.assert_not_awaited()
