@@ -21,6 +21,10 @@ class SigningKeyClient(Protocol):
     def get_signing_key_from_jwt(self, token: str) -> PyJWK: ...
 
 
+class TokenVerifier(Protocol):
+    async def verify(self, token: str) -> "AuthenticatedIdentity": ...
+
+
 @dataclass(frozen=True)
 class AuthenticatedIdentity:
     subject: UUID

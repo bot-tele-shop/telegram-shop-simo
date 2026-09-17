@@ -2,11 +2,19 @@
 
 import asyncio
 import os
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
 
+from digital_shelf.admin import (
+    DatabaseAdminAuthorizer,
+    DatabaseFeatureStore,
+    FeatureUpdateCommand,
+)
+from digital_shelf.auth import AuthenticatedIdentity
 from digital_shelf.db import create_engine, database_ready
+from digital_shelf.features import FeatureKey, FeatureState
 
 
 @pytest.mark.integration
@@ -41,7 +49,7 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                     (
                         await connection.execute(
                             text(
-                                "SELECT feature_key, requested_enabled, state "
+                                "SELECT feature_key, requested_enabled, state, revision "
                                 "FROM digital_shelf.feature_flags ORDER BY feature_key"
                             )
                         )
@@ -68,7 +76,71 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                 "feature_key": "low_stock_alerts",
                 "requested_enabled": True,
                 "state": "setup_required",
+                "revision": 1,
             }
+
+            subject = uuid4()
+            async with engine.begin() as connection:
+                admin_id = await connection.scalar(
+                    text(
+                        """
+                        INSERT INTO digital_shelf.admin_users (auth_subject, email)
+                        VALUES (:subject, :email)
+                        RETURNING id
+                        """
+                    ),
+                    {"subject": subject, "email": f"{subject}@example.com"},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO digital_shelf.admin_user_roles (admin_user_id, role_name)
+                        VALUES (:admin_id, 'owner')
+                        """
+                    ),
+                    {"admin_id": admin_id},
+                )
+
+            principal = await DatabaseAdminAuthorizer(engine).authorize(
+                AuthenticatedIdentity(subject=subject, email=f"{subject}@example.com")
+            )
+            assert principal.admin_id == admin_id
+            assert principal.allows("features.manage")
+
+            updated = await DatabaseFeatureStore(engine).update_feature(
+                feature=FeatureKey.LOW_STOCK_ALERTS,
+                command=FeatureUpdateCommand(
+                    requested_enabled=True,
+                    config={"owner_destination": "123", "threshold": 3},
+                    expected_revision=1,
+                ),
+                actor_admin_id=principal.admin_id,
+                correlation_id=uuid4(),
+            )
+            assert updated.state is FeatureState.ENABLED
+            assert updated.revision == 2
+
+            async with engine.connect() as connection:
+                persisted_state = await connection.scalar(
+                    text(
+                        """
+                        SELECT state FROM digital_shelf.feature_flags
+                        WHERE feature_key = 'low_stock_alerts'
+                        """
+                    )
+                )
+                audit_count = await connection.scalar(
+                    text(
+                        """
+                        SELECT count(*) FROM digital_shelf.audit_events
+                        WHERE action = 'feature.update'
+                          AND actor_admin_id = :admin_id
+                        """
+                    ),
+                    {"admin_id": principal.admin_id},
+                )
+            assert persisted_state == "enabled"
+            assert audit_count == 1
         finally:
             await engine.dispose()
 
