@@ -15,6 +15,12 @@ from digital_shelf.admin import (
 from digital_shelf.auth import AuthenticatedIdentity
 from digital_shelf.db import create_engine, database_ready
 from digital_shelf.features import FeatureKey, FeatureState
+from digital_shelf.store_settings import (
+    DatabaseSettingStore,
+    SettingRevisionConflictError,
+    SettingsPatchCommand,
+    SettingUpdate,
+)
 
 
 @pytest.mark.integration
@@ -141,6 +147,75 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                 )
             assert persisted_state == "enabled"
             assert audit_count == 1
+
+            setting_store = DatabaseSettingStore(engine)
+            updated_settings = await setting_store.update_settings(
+                command=SettingsPatchCommand(
+                    updates=[
+                        SettingUpdate(
+                            key="checkout_paused",
+                            value=True,
+                            expected_revision=0,
+                        ),
+                        SettingUpdate(
+                            key="shop_name",
+                            value="Digital Shelf",
+                            expected_revision=0,
+                        ),
+                    ]
+                ),
+                actor_admin_id=principal.admin_id,
+                correlation_id=uuid4(),
+            )
+            assert [(item.key.value, item.revision) for item in updated_settings] == [
+                ("checkout_paused", 1),
+                ("shop_name", 1),
+            ]
+
+            with pytest.raises(SettingRevisionConflictError):
+                await setting_store.update_settings(
+                    command=SettingsPatchCommand(
+                        updates=[
+                            SettingUpdate(
+                                key="checkout_paused",
+                                value=False,
+                                expected_revision=1,
+                            ),
+                            SettingUpdate(
+                                key="support_contact",
+                                value="@StoreSupport",
+                                expected_revision=99,
+                            ),
+                        ]
+                    ),
+                    actor_admin_id=principal.admin_id,
+                    correlation_id=uuid4(),
+                )
+
+            async with engine.connect() as connection:
+                checkout_row = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT value, revision FROM digital_shelf.store_settings
+                            WHERE key = 'checkout_paused'
+                            """
+                        )
+                    )
+                ).mappings().one()
+                setting_audit_count = await connection.scalar(
+                    text(
+                        """
+                        SELECT count(*) FROM digital_shelf.audit_events
+                        WHERE action = 'setting.update'
+                          AND actor_admin_id = :admin_id
+                        """
+                    ),
+                    {"admin_id": principal.admin_id},
+                )
+            assert checkout_row["value"] is True
+            assert checkout_row["revision"] == 1
+            assert setting_audit_count == 2
         finally:
             await engine.dispose()
 

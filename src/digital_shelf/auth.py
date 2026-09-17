@@ -58,7 +58,7 @@ class SupabaseJWTVerifier:
             f"{issuer}/.well-known/jwks.json",
             cache_jwk_set=True,
             lifespan=600,
-            cache_keys=True,
+            cache_keys=False,
         )
 
     def _decode(self, token: str) -> dict[str, Any]:
