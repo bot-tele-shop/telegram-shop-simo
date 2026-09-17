@@ -16,9 +16,11 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     LabeledPrice,
     Message,
     PreCheckoutQuery,
+    ReplyKeyboardMarkup,
     TelegramObject,
 )
 
@@ -26,7 +28,13 @@ from .canboso import CanbosoError, valid_email
 from .config import Settings
 from .delivery import DeliveryWorker, send_delivery
 from .store import ShopError, Store
-from .storefront import back_rows, information_text, menu_rows, welcome_text
+from .storefront import (
+    back_rows,
+    information_text,
+    menu_rows,
+    quick_menu_rows,
+    welcome_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -182,19 +190,35 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
         if user_id not in settings.admin_ids:
             raise ShopError("This action is available to shop administrators only")
 
-    async def home(message: Message) -> None:
+    async def home(message: Message, *, persistent_menu: bool = False) -> None:
+        if persistent_menu:
+            await message.answer(
+                "Quick access is ready below.",
+                reply_markup=ReplyKeyboardMarkup(
+                    keyboard=[
+                        [KeyboardButton(text=button["text"]) for button in row]
+                        for row in quick_menu_rows()
+                    ],
+                    resize_keyboard=True,
+                    is_persistent=True,
+                    input_field_placeholder="Choose an option",
+                ),
+            )
         await message.answer(
-            welcome_text(settings.shop_name, test_mode=settings.environment == "test",
-                         paused=not settings.enable_sales),
+            welcome_text(
+                settings.shop_name,
+                test_mode=settings.environment == "test",
+                paused=not settings.enable_sales,
+            ),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=menu_rows()),
         )
 
     async def information(message: Message, page: str, user_id: int) -> None:
-        rows = [[("🛍 Products", "cat:0"), ("📋 Orders", "orders")],
-                [("🏠 Main menu", "home")]]
-        await message.answer(information_text(page, user_id), parse_mode=None,
-                             reply_markup=keyboard(rows))
+        rows = [[("🛍 Products", "cat:0"), ("📋 Orders", "orders")], [("🏠 Main menu", "home")]]
+        await message.answer(
+            information_text(page, user_id), parse_mode=None, reply_markup=keyboard(rows)
+        )
 
     async def catalog(message: Message, page: int = 0) -> None:
         products = await asyncio.to_thread(store.list_products)
@@ -261,8 +285,10 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
         await asyncio.to_thread(store.expire_orders)
         orders = await asyncio.to_thread(store.user_orders, user_id)
         if not orders:
-            await message.answer("You have no orders yet. Use /shop to browse.",
-                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=back_rows()))
+            await message.answer(
+                "You have no orders yet. Use /shop to browse.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=back_rows()),
+            )
             return
         rows = []
         for order in orders:
@@ -372,7 +398,7 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
 
     @router.message(Command("start", "menu"))
     async def start(message: Message) -> None:
-        await home(message)
+        await home(message, persistent_menu=True)
 
     @router.message(Command("shop"))
     async def shop(message: Message) -> None:
@@ -595,12 +621,21 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
             details = f"Available units: {product['available']}"
             if product["source"] == "supplier":
                 spec = await asyncio.to_thread(store.supplier.mapping, product["sku"])
-                details = "Fulfilled by Canboso after payment. Supplier availability is checked locally."
+                details = (
+                    "Fulfilled by Canboso after payment. Supplier availability is checked locally."
+                )
                 if spec["product_type"] == "slot":
                     details += "\n" + slot_details(spec)
                     details += "\nAn email shared with the supplier and confirmation are required."
-                rows.insert(0, [(f"Buy {spec['product_type']} for {product['price_stars']} Stars",
-                                 f"buy:{product['sku']}")])
+                rows.insert(
+                    0,
+                    [
+                        (
+                            f"Buy {spec['product_type']} for {product['price_stars']} Stars",
+                            f"buy:{product['sku']}",
+                        )
+                    ],
+                )
             elif product["available"]:
                 rows.insert(
                     0, [(f"Buy for {product['price_stars']} Stars", f"buy:{product['sku']}")]
@@ -724,6 +759,23 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
     @router.message()
     async def fallback(message: Message) -> None:
         user_id = message.from_user.id
+        quick_action = (message.text or "").strip()
+        if quick_action == "🛍 Products":
+            await catalog(message)
+            return
+        if quick_action == "🛟 Support":
+            await message.answer(
+                f"Purchase support: {settings.support_contact}\n\n"
+                "Include your order ID from /orders, not your product key or bot credentials.",
+                parse_mode=None,
+            )
+            return
+        if quick_action == "⭐ Payments":
+            await information(message, "payments", user_id)
+            return
+        if quick_action == "🔗 API":
+            await information(message, "api", user_id)
+            return
         pending = awaiting_slot.get(user_id)
         if pending is not None and not (message.text or "").startswith("/"):
             sku, expires_at = pending
