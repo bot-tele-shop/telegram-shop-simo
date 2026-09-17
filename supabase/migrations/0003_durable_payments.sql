@@ -14,6 +14,10 @@ alter table update_inbox drop constraint if exists update_inbox_state_check;
 alter table update_inbox add constraint update_inbox_state_check
     check (state in ('processing', 'done', 'failed'));
 
+-- The previous claim_update returned boolean; the durable version returns
+-- text, so the old function must be dropped first (return type change).
+drop function if exists claim_update(bigint, text);
+
 -- claim_update returns:
 --   'claimed'  first time we see this update -> process it
 --   'retry'    previous attempt crashed and its lease went stale -> process again
