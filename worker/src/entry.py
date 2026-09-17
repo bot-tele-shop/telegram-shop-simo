@@ -18,17 +18,55 @@ Runtime notes (verified against the live 2026 runtime):
   request.json() with to_py() only when needed.
 """
 
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+import admin as admin_api
 import flow
 from workers import Response, WorkerEntrypoint
 
 
+def _json(payload, status=200, headers=None):
+    import json
+
+    h = {"Content-Type": "application/json"}
+    if headers:
+        h.update(headers)
+    return Response(json.dumps(payload), status=status, headers=h)
+
+
 class Default(WorkerEntrypoint):
+    def _cors(self):
+        origin = str(getattr(self.env, "DASHBOARD_ORIGIN", "") or "")
+        if not origin:
+            return {}
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Headers": "authorization, content-type",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Vary": "Origin",
+        }
+
     async def on_fetch(self, request):
         url = urlparse(str(request.url))
         if url.path == "/health":
             return Response("ok")
+
+        # Private admin API for the dashboard (Supabase Auth + owner allowlist).
+        if url.path.startswith("/admin/api/"):
+            cors = self._cors()
+            if str(request.method) == "OPTIONS":
+                return Response("", status=204, headers=cors)
+            action = url.path[len("/admin/api/"):]
+            query = {k: v[0] for k, v in parse_qs(url.query).items()}
+            try:
+                status, payload = await admin_api.handle_admin(request, self.env, action, query)
+            except admin_api.AdminError as exc:
+                status, payload = exc.status, {"ok": False, "error": str(exc)}
+            except Exception as exc:
+                print(f"admin error: {type(exc).__name__}: {exc}")
+                status, payload = 500, {"ok": False, "error": "internal error"}
+            return _json(payload, status=status, headers=cors)
+
         expected = f"/webhook/{str(self.env.WEBHOOK_SECRET)}"
         if str(request.method) == "POST" and url.path == expected:
             # Authenticate Telegram's secret-token header when configured.

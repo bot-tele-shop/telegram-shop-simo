@@ -108,3 +108,44 @@ def test_fixed_worker_source_has_no_second_unpad():
     src = (Path(__file__).parents[1] / "worker/src/fernet.py").read_text()
     assert "data[:-pad]" not in src
     assert "pad = data[-1]" not in src
+
+
+def test_worker_side_encryption_is_readable_by_python_fernet(key):
+    """Dashboard stock uploads encrypt in the Worker; Python must read them
+    (and the Worker decrypt path must read its own output)."""
+    cases = [{"op": "encrypt", "key": key, "plaintext": s} for s in SAMPLES]
+    results = run_bridge(cases)
+    for sample, result in zip(SAMPLES, results):
+        assert result["ok"], (sample, result)
+        # Python cryptography.Fernet decrypts what the Worker encrypted.
+        assert PyFernet(key.encode()).decrypt(result["token"].encode()).decode() == sample
+        # and the bridge's own decrypt path round-trips it too
+        (again,) = run_bridge([{"key": key, "token": result["token"]}])
+        assert again == {"ok": True, "plaintext": sample}
+
+
+def test_worker_fingerprint_matches_python_convention():
+    """fingerprint_of in worker/src/fernet.py must equal shop/store.py's
+    HMAC-SHA256(sha256(key_b64), payload) dedup fingerprint."""
+    import hashlib
+    import hmac
+    import importlib.util
+    import sys
+    from types import SimpleNamespace
+
+    # stub the Workers-only imports so the module loads under CPython
+    sys.modules.setdefault("js", SimpleNamespace(Object=None, Uint8Array=None, crypto=None))
+    sys.modules.setdefault("pyodide", SimpleNamespace(ffi=SimpleNamespace(to_js=None)))
+    sys.modules.setdefault("pyodide.ffi", SimpleNamespace(to_js=None))
+    spec = importlib.util.spec_from_file_location(
+        "worker_fernet", Path(__file__).parents[1] / "worker/src/fernet.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    key_b64 = PyFernet.generate_key().decode()
+    for payload in ("CODE-1", "https://example.com/x", "üñïcode"):
+        expected = hmac.new(
+            hashlib.sha256(key_b64.encode()).digest(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        assert module.fingerprint_of(key_b64, payload) == expected

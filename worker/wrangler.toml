@@ -15,3 +15,5 @@ compatibility_date = "2025-06-01"
 SHOP_NAME = "Digital Shelf"
 SUPABASE_URL = "https://lnaszistlucibbrcjewi.supabase.co"
 SUPPORT_CONTACT = "@yourusername"
+# CORS origin for the private dashboard (Cloudflare Pages). Non-secret.
+DASHBOARD_ORIGIN = "https://digital-shelf-admin.pages.dev"

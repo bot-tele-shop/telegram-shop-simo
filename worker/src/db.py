@@ -5,12 +5,25 @@ from httpclient import request
 
 class DB:
     def __init__(self, url, service_key):
+        self.base = url
         self.rest = f"{url}/rest/v1"
         self.headers = {
             "apikey": service_key,
             "Authorization": f"Bearer {service_key}",
             "Content-Type": "application/json",
         }
+
+    async def request_auth_user(self, token):
+        """Validate a Supabase Auth user JWT. Returns the user dict or None."""
+        try:
+            return await request(
+                "GET",
+                f"{self.base}/auth/v1/user",
+                headers={"apikey": self.headers["apikey"],
+                         "Authorization": f"Bearer {token}"},
+            )
+        except Exception:
+            return None
 
     async def rpc(self, fn, args):
         return await request("POST", f"{self.rest}/rpc/{fn}", headers=self.headers, payload=args)
