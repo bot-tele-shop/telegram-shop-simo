@@ -81,6 +81,16 @@ jobs:
           };
           EOF
 
+      - name: Ensure Pages project exists
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: dashboard
+          wranglerVersion: "4.132.0"
+          command: pages project create digital-shelf-admin --production-branch=main
+        continue-on-error: true  # fails harmlessly when the project exists
+
       - name: Deploy dashboard
         uses: cloudflare/wrangler-action@v3
         with:
