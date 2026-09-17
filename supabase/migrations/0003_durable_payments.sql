@@ -68,7 +68,6 @@ alter table orders add column if not exists delivery_attempts integer not null d
 -- 3. Fulfillment: bind payer/amount/currency/charge to the order, allocate
 --    stock before delivery, confirm delivery only after Telegram succeeds,
 --    and persist unexpected paid events for review instead of dropping them.
-drop function if exists fulfill_order(text, text, bigint, integer);
 create or replace function fulfill_order(
     p_order_id text,
     p_charge_id text,
@@ -279,4 +278,19 @@ language sql
 stable
 as $$
     select coalesce((select value from metadata where key = 'checkout_paused'), 'false') = 'true';
+$$;
+
+-- Backward-compatible 4-argument overload: the previous Worker release calls
+-- fulfill_order without a currency. It delegates to the v2 implementation so
+-- live payments keep working between the migration and the Worker deploy.
+create or replace function fulfill_order(
+    p_order_id text,
+    p_charge_id text,
+    p_user_id bigint,
+    p_amount integer
+)
+returns json
+language sql
+as $$
+    select fulfill_order(p_order_id, p_charge_id, p_user_id, p_amount, 'XTR');
 $$;
