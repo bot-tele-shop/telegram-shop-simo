@@ -4,10 +4,11 @@ from pathlib import Path
 import pytest
 from aiogram.methods import AnswerCallbackQuery, SendInvoice, SendMessage
 from aiogram.types import Chat
-from shop.bot import build_dispatcher
-from shop.storefront import MENU, information_text, menu_rows, welcome_text
 from test_bot import callback, feed, message
 from test_bot import harness as harness
+
+from shop.bot import build_dispatcher
+from shop.storefront import MENU, information_text, menu_rows, welcome_text
 
 
 def last_message(h):
