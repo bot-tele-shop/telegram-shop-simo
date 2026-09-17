@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from digital_shelf.admin import (
@@ -20,6 +20,7 @@ from digital_shelf.admin import (
     FeatureView,
     RevisionConflictError,
 )
+from digital_shelf.admin_audit import AuditEventView, AuditStore, DatabaseAuditStore
 from digital_shelf.auth import (
     AuthenticationError,
     SupabaseJWTVerifier,
@@ -48,6 +49,7 @@ def create_app(
     admin_authorizer: AdminAuthorizer | None = None,
     feature_store: FeatureStore | None = None,
     setting_store: SettingStore | None = None,
+    audit_store: AuditStore | None = None,
 ) -> FastAPI:
     runtime_settings = settings or get_settings()
 
@@ -65,6 +67,7 @@ def create_app(
         app.state.admin_authorizer = admin_authorizer or DatabaseAdminAuthorizer(app.state.engine)
         app.state.feature_store = feature_store or DatabaseFeatureStore(app.state.engine)
         app.state.setting_store = setting_store or DatabaseSettingStore(app.state.engine)
+        app.state.audit_store = audit_store or DatabaseAuditStore(app.state.engine)
         yield
         await app.state.engine.dispose()
 
@@ -198,6 +201,16 @@ def create_app(
             )
         except SettingRevisionConflictError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, "setting changed; reload and retry") from exc
+
+    @application.get("/admin/v1/audit", response_model=list[AuditEventView], tags=["admin"])
+    async def list_audit_events(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[AuditEventView]:
+        require_permission(admin, "audit.read")
+        store: AuditStore = request.app.state.audit_store
+        return list(await store.list_events(limit=limit))
 
     return application
 

@@ -12,6 +12,7 @@ from digital_shelf.admin import (
     DatabaseFeatureStore,
     FeatureUpdateCommand,
 )
+from digital_shelf.admin_audit import DatabaseAuditStore
 from digital_shelf.auth import AuthenticatedIdentity
 from digital_shelf.db import create_engine, database_ready
 from digital_shelf.features import FeatureKey, FeatureState
@@ -216,6 +217,11 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
             assert checkout_row["value"] is True
             assert checkout_row["revision"] == 1
             assert setting_audit_count == 2
+
+            recent_audit = await DatabaseAuditStore(engine).list_events(limit=10)
+            assert len(recent_audit) == 3
+            assert recent_audit[0].action == "setting.update"
+            assert "detail" not in recent_audit[0].model_dump()
         finally:
             await engine.dispose()
 
