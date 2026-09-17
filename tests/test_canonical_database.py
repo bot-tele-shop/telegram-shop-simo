@@ -27,8 +27,48 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                         "WHERE schema_name = 'digital_shelf'"
                     )
                 )
-            assert revision == "0001_bootstrap"
+                table_names = set(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT table_name FROM information_schema.tables "
+                                "WHERE table_schema = 'digital_shelf'"
+                            )
+                        )
+                    ).scalars()
+                )
+                feature_rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT feature_key, requested_enabled, state "
+                                "FROM digital_shelf.feature_flags ORDER BY feature_key"
+                            )
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+            assert revision == "0002_identity_settings_features"
             assert schema == "digital_shelf"
+            assert {
+                "users",
+                "admin_users",
+                "roles",
+                "role_permissions",
+                "admin_user_roles",
+                "store_settings",
+                "store_setting_revisions",
+                "feature_flags",
+                "audit_events",
+            } <= table_names
+            by_key = {row["feature_key"]: row for row in feature_rows}
+            assert by_key["offers"]["state"] == "disabled"
+            assert dict(by_key["low_stock_alerts"]) == {
+                "feature_key": "low_stock_alerts",
+                "requested_enabled": True,
+                "state": "setup_required",
+            }
         finally:
             await engine.dispose()
 
