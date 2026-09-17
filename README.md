@@ -25,11 +25,28 @@ See `LAUNCH.md` for the full go-live checklist.
 
 ## Cloud deployment (Cloudflare + Supabase + GitHub Actions)
 
-Every push to `main` that touches `worker/` deploys automatically to
-Cloudflare Workers. See `docs/DEPLOYMENT.md` for the one-time setup
-(Cloudflare API token in GitHub secrets, Worker secrets sync, webhook
-registration) and `tools/push_to_supabase.py` to seed Supabase with your
-local catalog and encrypted stock.
+Merges to `main` deploy automatically — but only after lint and the full test
+suite pass for that exact commit (see the `deploy` jobs in
+`.github/workflows/ci.yml`). Pull requests never deploy. See
+`docs/DEPLOYMENT.md` for the one-time setup and `tools/push_to_supabase.py`
+to seed Supabase with your local catalog and encrypted stock.
+
+## Owner dashboard
+
+A private dashboard lives at https://digital-shelf-admin.pages.dev
+(Cloudflare Pages, source in `dashboard/`). Sign in with the owner Supabase
+account (email must be in the `OWNER_EMAILS` Worker secret). From it you can:
+
+1. Create a product (always starts inactive)
+2. Bulk-upload codes/download URLs on the Stock tab — encrypted server-side
+3. Activate the product once stock is ready; it appears in the Telegram shop
+4. Watch orders, resend a buyer's code (always the same code), or issue a
+   double-confirmed Stars refund (the code is quarantined, never resold)
+5. Pause checkout, edit store name/support/terms on the Settings tab
+   (changing terms makes buyers re-accept at next checkout)
+
+The dashboard API runs inside the same Worker under `/admin/api/*` and
+validates the Supabase session and owner allowlist on every request.
 
 ## Rules that keep this project safe
 
