@@ -70,6 +70,24 @@ class Ctx:
         )
         return bool(row and row.get("value") == "true")
 
+    async def load_settings(self):
+        """The metadata table is the single source of truth for shop settings:
+        dashboard edits take effect here and a deploy can never overwrite them.
+        Environment values are only the fallback for keys never set."""
+        try:
+            rows = await self.db.select("metadata", {"select": "key,value"}, limit=100)
+        except Exception:
+            return
+        values = {row["key"]: row["value"] for row in rows}
+        if values.get("shop_name"):
+            self.shop_name = values["shop_name"]
+        if values.get("support_contact"):
+            self.support = values["support_contact"]
+        if values.get("terms_text"):
+            self.terms = values["terms_text"]
+        if values.get("privacy_text"):
+            self.privacy = values["privacy_text"]
+
 
 async def has_accepted(ctx, user_id):
     row = await ctx.db.select_one(
@@ -450,6 +468,7 @@ async def handle_callback(ctx, callback):
 
 async def handle_update(update, env):
     ctx = Ctx(env)
+    await ctx.load_settings()
     update_id = update.get("update_id")
     if update_id is None:
         return

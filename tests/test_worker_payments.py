@@ -44,6 +44,7 @@ def ctx(worker_modules):
         terms_version="v1", admins=[7],
         notify_admins=AsyncMock(),
         checkout_paused=AsyncMock(return_value=False),
+        load_settings=AsyncMock(),
     )
 
 

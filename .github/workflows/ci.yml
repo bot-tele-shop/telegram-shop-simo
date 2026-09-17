@@ -16,28 +16,27 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Lint
         run: ruff check shop tests worker/src tools scripts
 
-      - name: Test suite
+      - name: Test suite (includes real-WebCrypto Fernet regression tests)
         run: python -m pytest -q
 
       - name: Worker syntax check
         run: python -m py_compile worker/src/*.py
 
-      - name: Dashboard checks
-        if: ${{ hashFiles('dashboard/package.json') != '' }}
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run lint --if-present
-          npm run build
+      - name: Dashboard JS syntax check
+        run: node --check dashboard/app.js
 
   deploy:
-    name: Deploy to Cloudflare
+    name: Deploy Worker to Cloudflare
     # Only a trusted main-branch push whose own checks passed may deploy.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
@@ -56,3 +55,37 @@ jobs:
           workingDirectory: worker
           wranglerVersion: "4.132.0"
           command: deploy
+
+  deploy-dashboard:
+    name: Deploy dashboard to Cloudflare Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate public dashboard config
+        env:
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+        run: |
+          test -n "$SUPABASE_PROJECT_REF" && test -n "$SUPABASE_ANON_KEY"
+          cat > dashboard/config.js <<EOF
+          const CONFIG = {
+            projectRef: "${SUPABASE_PROJECT_REF}",
+            anonKey: "${SUPABASE_ANON_KEY}",
+            workerUrl: "https://digital-shelf-bot.work-simo-space.workers.dev",
+          };
+          EOF
+
+      - name: Deploy dashboard
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: dashboard
+          wranglerVersion: "4.132.0"
+          command: pages deploy . --project-name=digital-shelf-admin

@@ -1,0 +1,55 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: system-ui, sans-serif;
+  background: #0d1117; color: #e6edf3;
+}
+header {
+  padding: 12px 20px; border-bottom: 1px solid #30363d;
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+}
+header h1 { font-size: 18px; margin: 0; }
+nav { display: flex; gap: 6px; flex-wrap: wrap; }
+button {
+  background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+  border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 14px;
+}
+button:hover { background: #30363d; }
+button.active { background: #1f6feb; border-color: #1f6feb; }
+button.danger { border-color: #da3633; color: #ff7b72; }
+button.ghost { opacity: 0.7; }
+main { padding: 20px; max-width: 1000px; margin: 0 auto; }
+.card {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 14px 16px; margin-bottom: 12px;
+}
+.card.narrow { max-width: 380px; margin: 40px auto; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.stat b { font-size: 22px; display: block; }
+.stat span { color: #8b949e; font-size: 13px; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.spread { justify-content: space-between; }
+label { display: block; margin: 8px 0; font-size: 13px; color: #8b949e; }
+input, textarea, select {
+  display: block; width: 100%; margin-top: 4px; padding: 7px 9px;
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+  font-size: 14px; font-family: inherit;
+}
+input[type="checkbox"] { display: inline; width: auto; margin-right: 8px; }
+.row label { flex: 1; min-width: 140px; }
+.muted { color: #8b949e; font-size: 13px; }
+.error { color: #ff7b72; }
+.warn { color: #d29922; }
+.badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
+  background: #30363d; margin-left: 4px;
+}
+.badge.ok { background: #1a7f37; }
+.badge.bad { background: #7a2e2e; }
+code { background: #30363d; padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+#toast {
+  position: fixed; bottom: 20px; right: 20px; background: #1f6feb;
+  padding: 10px 16px; border-radius: 8px; font-size: 14px;
+}
+#toast.error { background: #da3633; }
+h2 { font-size: 17px; } h3 { font-size: 15px; margin-top: 0; }
