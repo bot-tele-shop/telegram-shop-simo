@@ -14,7 +14,7 @@ Implemented and locally verified so far:
 - structured secret-redacting logs
 - async SQLAlchemy/asyncpg database readiness
 - Alembic bootstrap migration against PostgreSQL
-- 856 legacy-plus-canonical tests passed locally (1 external database test skipped)
+- 861 legacy-plus-canonical tests passed locally (1 external database test skipped)
 - lint, strict type checking and dashboard JavaScript syntax
 - canonical container built successfully in GitHub CI on `main`
 - earlier merged `main` branch CI execution passed on GitHub Actions; the current feature branch has not run CI
@@ -29,10 +29,13 @@ Current unmerged branch `feature/canonical-settings-features` additionally conta
 - local tests, lint, strict typing, and Alembic offline upgrade/downgrade SQL checks
 - canonical category/product/asset schema and normalized catalog admin read/create API
 - explicit fulfillment/inventory policy compatibility checks and customer-safe product views
+- encrypted inventory item/counter schema and Fernet-compatible import preview primitives
 
 Release 1 is **not gated complete**. Docker/PostgreSQL is unavailable locally, so the real database integration test is pending. Both saved GitHub CLI account tokens are invalid, preventing push/PR/CI. No canonical migration or API route has been deployed to production.
 
 Release 2 catalog work has begun locally. The catalog policy/schema and category/product create/list API are implemented and covered by local tests, but Release 2 remains gated until the real PostgreSQL catalog/inventory invariants run in CI.
+
+Inventory encryption and import validation are implemented locally. The two-stage admin inventory API and real concurrent allocation behavior are still pending; no inventory data has been migrated or exposed in production.
 
 Current production UI work:
 
