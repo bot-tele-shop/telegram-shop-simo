@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from typing import Callable
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -56,6 +57,15 @@ class DeliveryWorker:
         self.store = store
         self.bot = bot
         self.admin_ids = admin_ids
+        # Set by kick() the moment a payment lands; run() still sweeps every 5s
+        # as a safety net for retries and crash recovery.
+        self.wake = asyncio.Event()
+        self.also_wake: list[Callable[[], None]] = []
+
+    def kick(self) -> None:
+        self.wake.set()
+        for callback in self.also_wake:
+            callback()
 
     async def notify_admins(self, text: str) -> None:
         for admin_id in self.admin_ids:
@@ -99,4 +109,8 @@ class DeliveryWorker:
                 await self.tick()
             except Exception as exc:
                 log.error("Delivery worker paused (%s)", type(exc).__name__)
-            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(self.wake.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            self.wake.clear()

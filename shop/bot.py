@@ -223,21 +223,24 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
     async def catalog(message: Message, page: int = 0) -> None:
         products = await asyncio.to_thread(store.list_products)
         page = max(0, min(page, max(0, (len(products) - 1) // 8)))
+        page_products = products[page * 8 : (page + 1) * 8]
+        specs = await asyncio.to_thread(
+            store.supplier.mapping_many,
+            [p["sku"] for p in page_products if p["source"] == "supplier"],
+        )
         rows = []
-        for product in products[page * 8 : (page + 1) * 8]:
+        for product in page_products:
             availability = (
                 "sold out" if not product["available"] else f"{product['price_stars']} Stars"
             )
             title = product["title"]
             if product["source"] == "supplier":
                 availability = f"{product['price_stars']} Stars | supplier"
-                try:
-                    spec = await asyncio.to_thread(store.supplier.mapping, product["sku"])
-                except ShopError:
+                spec = specs.get(product["sku"])
+                if spec is None:
                     availability += " (not connected)"
-                else:
-                    if spec.get("slot_months") is not None:
-                        title += f" | {spec['slot_months']} months"
+                elif spec.get("slot_months") is not None:
+                    title += f" | {spec['slot_months']} months"
             rows.append([(f"{title} | {availability}", f"p:{product['sku']}")])
         navigation = []
         if page:
@@ -290,10 +293,13 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=back_rows()),
             )
             return
+        infos = await asyncio.to_thread(
+            store.supplier.info_many, [order["id"] for order in orders]
+        )
         rows = []
         for order in orders:
             status = order["state"].replace("_", " ")
-            info = await asyncio.to_thread(store.supplier.info, order["id"])
+            info = infos.get(order["id"])
             if info and order["state"] == "paid":
                 status += f" / supplier {info['state'].replace('_', ' ')}"
                 if info["state"] in {"pending", "uncertain", "blocked", "failed"}:
@@ -320,6 +326,8 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
             payment.telegram_payment_charge_id,
         )
         # Persist first. No network call can prevent recording the payment.
+        if result.order_id and not result.duplicate:
+            worker.kick()  # Start delivery/supplier fulfillment now, not on the 5s sweep.
         if result.status == "review" and not result.duplicate:
             asyncio.create_task(
                 worker.notify_admins(

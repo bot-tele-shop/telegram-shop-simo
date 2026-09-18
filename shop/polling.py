@@ -29,6 +29,11 @@ def update_kind(update: Update) -> str:
 class DurablePolling:
     def __init__(self, bot: Bot, dispatcher: Dispatcher, store: Store) -> None:
         self.bot, self.dispatcher, self.store = bot, dispatcher, store
+        # Wake-up signal only; the durable inbox stays the source of truth, so a
+        # crash between queue push and claim loses nothing.
+        self.queues: dict[str, asyncio.Queue[int]] = {
+            kind: asyncio.Queue() for kind in ("checkout", "payment", "ui")
+        }
 
     async def receive(self) -> None:
         while True:
@@ -41,17 +46,17 @@ class DurablePolling:
                     limit=50,
                     allowed_updates=["message", "callback_query", "pre_checkout_query"],
                 )
-                await asyncio.to_thread(
-                    self.store.save_updates,
-                    [
-                        (
-                            update.update_id,
-                            update_kind(update),
-                            update.model_dump_json(exclude_none=True),
-                        )
-                        for update in updates
-                    ],
-                )
+                batch = [
+                    (
+                        update.update_id,
+                        update_kind(update),
+                        update.model_dump_json(exclude_none=True),
+                    )
+                    for update in updates
+                ]
+                await asyncio.to_thread(self.store.save_updates, batch)
+                for update_id, kind, _ in batch:
+                    self.queues[kind].put_nowait(update_id)
             except TelegramRetryAfter as exc:
                 await asyncio.sleep(min(120, max(1, exc.retry_after)))
             except TelegramAPIError as exc:
@@ -64,10 +69,16 @@ class DurablePolling:
             # a batch whose updates could not be made durable.
 
     async def consume(self, kind: str) -> None:
+        queue = self.queues[kind]
         while True:
+            # Fresh updates arrive instantly via the queue. The 0.5s fallback
+            # sweep covers crash recovery and scheduled retries.
+            try:
+                await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass
             item = await asyncio.to_thread(self.store.claim_update, kind)
             if item is None:
-                await asyncio.sleep(0.15)
                 continue
             update_id, body = item
             try:

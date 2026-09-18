@@ -96,6 +96,7 @@ async def run_bot(settings, store: Store) -> None:
                 transport = HttpTransport(supplier_session)
                 client = CanbosoClient(settings.canboso, transport, settings.environment)
                 supplier = SupplierWorker(store, client, worker)
+                worker.also_wake.append(supplier.kick)
             tasks = []
             try:
                 tasks.append(asyncio.create_task(worker.run()))

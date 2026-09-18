@@ -103,6 +103,18 @@ class SupplierState:
             raise ShopError("This supplier product has not been mapped yet")
         return json.loads(row[0])
 
+    def mapping_many(self, skus: list[str]) -> dict[str, dict]:
+        """Catalog display helper: unmapped SKUs are absent, not an error."""
+        if not skus:
+            return {}
+        placeholders = ",".join("?" * len(skus))
+        with self.store.connection() as db:
+            rows = db.execute(
+                f"SELECT sku,specification FROM supplier_mappings WHERE sku IN ({placeholders})",
+                skus,
+            ).fetchall()
+        return {row["sku"]: json.loads(row["specification"]) for row in rows}
+
     def cache_snapshot(self, products: dict, balance: dict) -> None:
         with self.store.transaction() as db:
             for name, body in (("products", products), ("balance", balance)):
@@ -242,6 +254,18 @@ class SupplierState:
         row = db.execute("SELECT state,supplier_reference,hold_reason,product_type,resolution_version "
                          "FROM supplier_intents WHERE order_id=?", (order_id,)).fetchone()
         return dict(row) if row else None
+
+    def info_many(self, order_ids: list[str]) -> dict[str, dict]:
+        if not order_ids:
+            return {}
+        placeholders = ",".join("?" * len(order_ids))
+        with self.store.connection() as db:
+            rows = db.execute(
+                "SELECT order_id,state,supplier_reference,hold_reason,product_type,"
+                f"resolution_version FROM supplier_intents WHERE order_id IN ({placeholders})",
+                order_ids,
+            ).fetchall()
+        return {row["order_id"]: dict(row) for row in rows}
 
     def preview_input(self, order_id: str, user_id: int) -> dict:
         with self.store.connection() as db:

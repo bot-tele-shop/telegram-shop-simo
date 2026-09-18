@@ -57,7 +57,13 @@ def supplier_ui():
     store = Mock(spec=Store)
     store.supplier = Mock(spec=SupplierState)
     store.supplier.mapping.side_effect = lambda sku: mappings[sku].copy()
+    store.supplier.mapping_many.side_effect = (
+        lambda skus: {sku: mappings[sku].copy() for sku in skus if sku in mappings}
+    )
     store.supplier.info.side_effect = lambda order_id: infos.get(order_id)
+    store.supplier.info_many.side_effect = (
+        lambda ids: {order_id: infos[order_id] for order_id in ids if order_id in infos}
+    )
     store.supplier.review.return_value = []
     store.get_product.side_effect = lambda sku: products[sku].copy()
     store.list_products.side_effect = lambda: list(products.values())
