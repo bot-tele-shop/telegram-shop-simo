@@ -1,3 +1,6 @@
+/* The hidden attribute must always win over display rules below. */
+[hidden] { display: none !important; }
+
 /* Digital Shelf owner console — "midnight ledger"
    Deep ink surfaces, warm Stars-gold accent, mono for codes. */
 
