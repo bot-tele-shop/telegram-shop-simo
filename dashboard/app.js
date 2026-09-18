@@ -168,6 +168,7 @@ async function loadView(name) {
     if (name === "products") await loadProducts();
     if (name === "stock") await loadStock();
     if (name === "orders") await loadOrders();
+    if (name === "activity") await loadActivity();
     if (name === "settings") await loadSettings();
   } catch (err) {
     toast(err.message, true);
@@ -177,7 +178,14 @@ async function loadView(name) {
 /* ---------- overview ---------- */
 async function loadOverview() {
   skeletons($("overview-cards"), 4, 84);
-  const [o, products] = await Promise.all([api("overview"), api("products")]);
+  // health/failed endpoints degrade gracefully on an older Worker deploy.
+  const optional = (p) => p.catch(() => null);
+  const [o, products, health, failed] = await Promise.all([
+    api("overview"),
+    api("products"),
+    optional(api("health")),
+    optional(api("updates/failed")),
+  ]);
   productsCache = products;
 
   const pill = $("shop-status");
@@ -248,6 +256,100 @@ async function loadOverview() {
         )
         .join("")
     : `<div class="empty-state">Stock levels look healthy.</div>`;
+
+  renderSystem(health);
+  renderFailedUpdates(failed);
+}
+
+/* ---------- system health ---------- */
+function renderSystem(h) {
+  const el = $("overview-system");
+  if (!h) {
+    el.innerHTML = `<div class="empty-state">System status needs the latest Worker deploy.</div>`;
+    return;
+  }
+  const rows = [];
+  if (!h.webhook) {
+    rows.push({ k: "Telegram webhook", v: "unreachable — bot token or Telegram API problem", bad: true });
+  } else if (!h.webhook.url) {
+    rows.push({ k: "Telegram webhook", v: "not registered — run the registration workflow", bad: true });
+  } else {
+    rows.push({ k: "Telegram webhook", v: `registered · ${h.webhook.pending_updates} pending` });
+    if (h.webhook.last_error)
+      rows.push({
+        k: "last webhook error",
+        v: `${h.webhook.last_error} (${timeAgo((h.webhook.last_error_at || 0) * 1000)})`,
+        bad: true,
+      });
+  }
+  rows.push({
+    k: "stuck processing",
+    v: `${h.stuck_updates.length} update${h.stuck_updates.length === 1 ? "" : "s"}`,
+    bad: h.stuck_updates.length > 0,
+  });
+  rows.push({
+    k: "stuck deliveries",
+    v: `${h.stuck_deliveries.length} order${h.stuck_deliveries.length === 1 ? "" : "s"}`,
+    bad: h.stuck_deliveries.length > 0,
+  });
+  el.innerHTML = rows
+    .map(
+      (r) => `
+      <div class="kv-row">
+        <span>${esc(r.k)}</span>
+        <b${r.bad ? ' style="color:var(--red)"' : ""}>${esc(r.v)}</b>
+      </div>`,
+    )
+    .join("");
+}
+
+/* ---------- failed updates ---------- */
+function renderFailedUpdates(rows) {
+  const el = $("overview-failed");
+  if (!rows) {
+    el.innerHTML = `<div class="empty-state">Failed-update inspection needs the latest Worker deploy.</div>`;
+    return;
+  }
+  el.innerHTML = rows.length
+    ? rows
+        .map(
+          (u) => `
+        <div class="alert-row">
+          <span>
+            <b class="mono">#${esc(u.update_id)}</b> ${esc(u.kind)} ·
+            ${esc(u.attempts)} attempt${u.attempts === 1 ? "" : "s"} · ${esc(timeAgo(u.updated_at))}
+            <br><span class="hint">${esc(u.last_error || "unknown error")}</span>
+          </span>
+          <button class="btn small" data-retry="${esc(u.update_id)}">Retry</button>
+        </div>`,
+        )
+        .join("")
+    : `<div class="empty-state">No failed updates.</div>`;
+}
+
+/* ---------- activity ---------- */
+async function loadActivity() {
+  const el = $("activity-list");
+  el.innerHTML = `<div class="empty-state">Loading…</div>`;
+  const rows = await api("audit");
+  el.innerHTML = rows.length
+    ? `<div class="activity-table">
+        <div class="activity-row head">
+          <span>When</span><span>Who</span><span>Action</span><span>Target</span>
+        </div>
+        ${rows
+          .map(
+            (r) => `
+          <div class="activity-row">
+            <span class="hint">${esc(timeAgo(r.created_at))}</span>
+            <span>${esc(r.actor)}</span>
+            <span><b>${esc(r.action)}</b></span>
+            <span class="mono">${esc(r.target || "—")}</span>
+          </div>`,
+          )
+          .join("")}
+      </div>`
+    : `<div class="empty-state">No owner actions recorded yet.</div>`;
 }
 
 /* ---------- earnings ---------- */
@@ -570,7 +672,7 @@ for (const b of document.querySelectorAll("#nav button[data-view]"))
 
 $("overview-refresh").addEventListener("click", () => loadView("overview"));
 $("earnings-refresh").addEventListener("click", () => loadView("earnings"));
-document.querySelector("#view-overview").addEventListener("click", (e) => {
+document.querySelector("#view-overview").addEventListener("click", async (e) => {
   const goto = e.target.closest("[data-goto]");
   if (goto) showView(goto.dataset.goto);
   const addstock = e.target.closest("[data-addstock]");
@@ -578,7 +680,24 @@ document.querySelector("#view-overview").addEventListener("click", (e) => {
     showView("stock", { deferLoad: true });
     loadStock(addstock.dataset.addstock).catch((err) => toast(err.message, true));
   }
+  const retry = e.target.closest("[data-retry]");
+  if (retry) {
+    retry.disabled = true;
+    try {
+      const result = await api("updates/retry", {
+        method: "POST",
+        body: { update_id: Number(retry.dataset.retry) },
+      });
+      toast(result.state === "done" ? "Update processed." : `Retry finished: ${result.state}`,
+        result.state === "failed");
+      await loadOverview();
+    } catch (err) {
+      retry.disabled = false;
+      toast(err.message, true);
+    }
+  }
 });
+$("activity-refresh").addEventListener("click", () => loadView("activity"));
 
 $("new-product").addEventListener("click", () => openProductDialog(null));
 $("product-cancel").addEventListener("click", () => $("product-dialog").close());

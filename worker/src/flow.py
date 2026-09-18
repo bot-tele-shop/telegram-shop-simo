@@ -675,7 +675,9 @@ async def handle_update(update, env):
 
     # Durable claim BEFORE processing. The update is acknowledged only after
     # it is safely processed or its failure is durably stored for retries.
-    claim = await ctx.db.rpc("claim_update", {"p_update_id": update_id, "p_kind": kind})
+    claim = await ctx.db.rpc(
+        "claim_update", {"p_update_id": update_id, "p_kind": kind, "p_payload": update}
+    )
     if claim == "done":
         return
     if claim == "busy":

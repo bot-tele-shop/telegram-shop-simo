@@ -237,6 +237,21 @@ main { flex: 1; padding: 34px 40px 80px; max-width: 1180px; }
 }
 
 /* ---------- panels ---------- */
+.kv-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 8px 0; border-bottom: 1px solid var(--line, rgba(255,255,255,.07));
+}
+.kv-row:last-child { border-bottom: 0; }
+.activity-table { display: grid; gap: 2px; }
+.activity-row {
+  display: grid; grid-template-columns: 110px 1fr 1fr 1fr; gap: 12px;
+  padding: 8px 0; border-bottom: 1px solid var(--line, rgba(255,255,255,.07));
+  align-items: baseline;
+}
+.activity-row.head { font-weight: 600; opacity: .7; }
+.activity-row:last-child { border-bottom: 0; }
+@media (max-width: 700px) { .activity-row { grid-template-columns: 90px 1fr 1fr; } .activity-row span:nth-child(4) { display: none; } }
+
 .panel {
   background: linear-gradient(170deg, var(--surface-2), var(--surface));
   border: 1px solid var(--line);
