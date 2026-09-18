@@ -92,7 +92,15 @@ class Admin:
         return await self.db.rpc("admin_overview", {})
 
     async def analytics(self, actor):
-        return await self.db.rpc("admin_analytics", {})
+        try:
+            return await self.db.rpc("admin_analytics", {})
+        except Exception as exc:
+            # httpclient.HttpError without the import: tests stub the module.
+            if getattr(exc, "status", None) == 404:
+                raise AdminError(
+                    503, "analytics unavailable: apply migration 0005_admin_analytics.sql"
+                ) from None
+            raise
 
     async def list_products(self, actor):
         return await self.db.rpc("admin_products", {})
