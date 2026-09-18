@@ -40,6 +40,7 @@ Repo -> Settings -> Secrets and variables -> Actions -> **Secrets** tab
 | `STOCK_FERNET_KEY` | `stock_encryption_key` from `config.local.json` (must match, or codes won't decrypt) |
 | `WEBHOOK_SECRET` | Random string, e.g. `openssl rand -hex 24` |
 | `ADMIN_IDS` | Comma-separated numeric Telegram IDs |
+| `SUPABASE_ACCESS_TOKEN` | supabase.com/dashboard/account/tokens (for auto-migrations) |
 
 Repo -> Settings -> Secrets and variables -> Actions -> **Variables** tab
 (public legal copy, not credentials — same texts as `config.local.json`):
@@ -57,6 +58,10 @@ compatibility; Variables are preferred since the texts are public anyway.)
 - **CI** (`ci.yml`) — ruff + 656 tests + worker syntax check on every push/PR
 - **Deploy to Cloudflare** (`deploy.yml`) — `wrangler deploy` on pushes to
   `main` that touch `worker/`, plus manual dispatch
+- **Supabase migrations** (`supabase-migrate.yml`) — applies any new
+  `supabase/migrations/*.sql` on pushes to `main` via the Management API;
+  a `_applied_migrations` table tracks what has run, so each migration is
+  applied exactly once and manual SQL-editor runs are no longer needed
 - **Sync Worker secrets** (`secrets.yml`) — manual; copies the GitHub secrets
   and variables above into Cloudflare Worker secrets (run after
   adding/rotating any of them)
