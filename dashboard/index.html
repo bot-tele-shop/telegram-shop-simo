@@ -3,183 +3,242 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Digital Shelf — Owner</title>
+<title>Digital Shelf — Owner Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+
+<!-- ============ LOGIN ============ -->
 <div id="login-screen">
-  <div class="login-card">
-    <p class="eyebrow">Owner console</p>
-    <h1>Digital Shelf</h1>
-    <p class="lede">Sign in to add products, load stock, and run the Telegram shop.</p>
-    <form id="login-form">
-      <label>Email <input type="email" id="login-email" required autocomplete="username"></label>
-      <label>Password <input type="password" id="login-password" required autocomplete="current-password"></label>
-      <button type="submit" class="primary">Sign in</button>
-      <p class="error" id="login-error" hidden></p>
-    </form>
+  <div class="login-wrap">
+    <div class="login-card">
+      <p class="eyebrow">Owner console</p>
+      <h1 class="display">Digital Shelf</h1>
+      <p class="lede">Your shop's control room. Products, stock, orders and refunds — all in one place.</p>
+      <form id="login-form">
+        <label class="field">
+          <span>Email</span>
+          <input type="email" id="login-email" required autocomplete="username" placeholder="you@example.com">
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" id="login-password" required autocomplete="current-password" placeholder="••••••••••••">
+        </label>
+        <button type="submit" class="btn primary block">Sign in</button>
+        <p class="form-error" id="login-error" hidden></p>
+      </form>
+    </div>
+    <p class="login-foot">Codes are encrypted before storage. This panel never shows them.</p>
   </div>
 </div>
 
+<!-- ============ SHELL ============ -->
 <div id="shell" hidden>
-  <aside>
+  <aside class="sidebar">
     <div class="brand">
-      <span class="mark">DS</span>
-      <div>
-        <strong>Digital Shelf</strong>
-        <small id="shop-status">checking…</small>
+      <span class="brand-mark">DS</span>
+      <div class="brand-text">
+        <strong class="display">Digital Shelf</strong>
+        <span id="shop-status" class="status-pill">checking…</span>
       </div>
     </div>
     <nav id="nav">
-      <button data-view="overview" class="active">Overview</button>
-      <button data-view="products">Products</button>
-      <button data-view="stock">Stock</button>
-      <button data-view="orders">Orders</button>
-      <button data-view="settings">Settings</button>
+      <button data-view="overview" class="active"><span class="nav-ico">◈</span>Overview</button>
+      <button data-view="products"><span class="nav-ico">▣</span>Products</button>
+      <button data-view="stock"><span class="nav-ico">✦</span>Stock</button>
+      <button data-view="orders"><span class="nav-ico">↔</span>Orders</button>
+      <button data-view="settings"><span class="nav-ico">⚙</span>Settings</button>
     </nav>
-    <button id="logout" class="ghost">Sign out</button>
+    <button id="logout" class="btn ghost">Sign out</button>
   </aside>
 
   <main>
+    <!-- ======== OVERVIEW ======== -->
     <section id="view-overview">
       <header class="page-head">
         <div>
           <p class="eyebrow">Shop health</p>
-          <h2>Overview</h2>
+          <h2 class="display">Overview</h2>
         </div>
+        <button class="btn ghost" id="overview-refresh">Refresh</button>
       </header>
       <div id="setup-banner" class="banner" hidden></div>
-      <div id="overview-cards" class="stats"></div>
-      <div class="panel">
-        <h3>Needs attention</h3>
-        <div id="overview-alerts"></div>
+      <div id="overview-cards" class="stats-grid"></div>
+      <div class="grid-2">
+        <div class="panel">
+          <h3>Needs attention</h3>
+          <div id="overview-alerts"></div>
+        </div>
+        <div class="panel">
+          <h3>Stock health</h3>
+          <p class="hint">Active products that are running out of codes.</p>
+          <div id="overview-lowstock"></div>
+        </div>
       </div>
     </section>
 
+    <!-- ======== PRODUCTS ======== -->
     <section id="view-products" hidden>
       <header class="page-head">
         <div>
           <p class="eyebrow">Catalog</p>
-          <h2>Products</h2>
+          <h2 class="display">Products</h2>
         </div>
-        <button id="new-product" class="primary">New product</button>
+        <button id="new-product" class="btn primary">+ New product</button>
       </header>
       <p class="hint">New products stay hidden from buyers until you upload stock and activate them.</p>
-      <div id="products-list" class="stack"></div>
+      <div id="products-list" class="product-grid"></div>
     </section>
 
+    <!-- ======== STOCK ======== -->
     <section id="view-stock" hidden>
       <header class="page-head">
         <div>
           <p class="eyebrow">Inventory</p>
-          <h2>Stock</h2>
+          <h2 class="display">Stock</h2>
         </div>
       </header>
       <div class="grid-2">
         <form id="stock-form" class="panel">
           <h3>Upload codes or URLs</h3>
-          <p class="hint">One per line, up to 500. Encrypted in the Worker before storage. Sold and quarantined rows are never overwritten.</p>
-          <label>Product
+          <p class="hint">One per line, up to 500. Encrypted in the Worker before storage. Duplicates are skipped, never overwritten.</p>
+          <label class="field">
+            <span>Product</span>
             <select id="s-sku" required></select>
           </label>
-          <label class="drop" id="dropzone">
+          <label class="dropzone" id="dropzone">
             <input type="file" id="s-file" accept=".txt,text/plain">
+            <span class="drop-ico">⤓</span>
             Drop a .txt file here, or paste below
           </label>
-          <label>Lines
-            <textarea id="s-lines" rows="8" placeholder="XXXX-XXXX-XXXX&#10;https://…"></textarea>
+          <label class="field">
+            <span>Lines <em id="s-count" class="line-count"></em></span>
+            <textarea id="s-lines" rows="9" placeholder="XXXX-XXXX-XXXX&#10;https://…"></textarea>
           </label>
-          <button type="submit" class="primary">Encrypt &amp; upload</button>
-          <p id="stock-result" class="hint"></p>
+          <button type="submit" class="btn primary block">Encrypt &amp; upload</button>
+          <p id="stock-result" class="form-note"></p>
         </form>
         <div class="panel">
           <h3>Loaded for this product</h3>
           <p class="hint">Fingerprints only — codes never appear here.</p>
-          <div id="stock-list"></div>
+          <div id="stock-state-filter" class="chip-row"></div>
+          <div id="stock-list" class="stock-table-wrap"></div>
         </div>
       </div>
     </section>
 
+    <!-- ======== ORDERS ======== -->
     <section id="view-orders" hidden>
       <header class="page-head">
         <div>
           <p class="eyebrow">Sales</p>
-          <h2>Orders</h2>
+          <h2 class="display">Orders</h2>
         </div>
       </header>
-      <div class="filters panel">
-        <label>State
-          <select id="o-state">
-            <option value="">all</option>
-            <option>invoice</option>
-            <option>checkout</option>
-            <option>expired</option>
-            <option>delivering</option>
-            <option>delivered</option>
-            <option>delivery_failed</option>
-            <option>needs_refund</option>
-            <option>refunded</option>
-          </select>
-        </label>
-        <label>Search
-          <input id="o-q" placeholder="order id, title or Telegram user id">
-        </label>
-        <button id="o-search" class="primary">Search</button>
+      <div class="panel filters-panel">
+        <div id="o-state-chips" class="chip-row"></div>
+        <div class="filters-row">
+          <input id="o-q" placeholder="Search order id, title or Telegram user id" class="grow">
+          <button id="o-search" class="btn primary">Search</button>
+        </div>
       </div>
       <div id="orders-list" class="stack"></div>
     </section>
 
+    <!-- ======== SETTINGS ======== -->
     <section id="view-settings" hidden>
       <header class="page-head">
         <div>
           <p class="eyebrow">Store</p>
-          <h2>Settings</h2>
+          <h2 class="display">Settings</h2>
         </div>
       </header>
-      <form id="settings-form" class="panel narrow">
-        <label>Store name <input id="set-shop_name" maxlength="64"></label>
-        <label>Support contact <input id="set-support_contact" maxlength="128" placeholder="email or @handle"></label>
-        <label>Terms text <textarea id="set-terms_text" rows="6"></textarea></label>
-        <label>Privacy text <textarea id="set-privacy_text" rows="6"></textarea></label>
-        <label class="check">
+
+      <div class="panel pause-card" id="pause-card">
+        <div>
+          <h3>Checkout</h3>
+          <p class="hint">Paused stops new invoices. Already-paid orders still deliver.</p>
+        </div>
+        <label class="switch">
           <input type="checkbox" id="set-checkout_paused">
-          Pause checkout — already-paid orders still deliver
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span id="pause-label">Open</span>
         </label>
-        <p class="warn" id="terms-warning" hidden>Changing terms or privacy requires every buyer to re-accept at next checkout.</p>
-        <button type="submit" class="primary">Save settings</button>
-        <p id="settings-result" class="hint"></p>
+      </div>
+
+      <form id="settings-form" class="panel narrow">
+        <label class="field">
+          <span>Store name</span>
+          <input id="set-shop_name" maxlength="64">
+        </label>
+        <label class="field">
+          <span>Support contact</span>
+          <input id="set-support_contact" maxlength="128" placeholder="email or @handle">
+        </label>
+        <label class="field">
+          <span>Terms text</span>
+          <textarea id="set-terms_text" rows="6"></textarea>
+        </label>
+        <label class="field">
+          <span>Privacy text</span>
+          <textarea id="set-privacy_text" rows="6"></textarea>
+        </label>
+        <p class="warn-banner" id="terms-warning" hidden>Changing terms or privacy requires every buyer to re-accept at next checkout.</p>
+        <button type="submit" class="btn primary">Save settings</button>
+        <p id="settings-result" class="form-note"></p>
       </form>
     </section>
   </main>
 </div>
 
-<dialog id="product-dialog">
+<!-- ============ PRODUCT DIALOG ============ -->
+<dialog id="product-dialog" class="modal">
   <form id="product-form" method="dialog">
-    <h3 id="product-dialog-title">New product</h3>
-    <p class="hint" id="product-dialog-hint">Created inactive. Upload stock, then activate.</p>
+    <h3 id="product-dialog-title" class="display">New product</h3>
+    <p class="hint" id="product-dialog-hint">Created hidden. Upload stock, then activate.</p>
     <input type="hidden" id="p-mode" value="create">
-    <label>SKU <input id="p-sku" required placeholder="win11-key" autocomplete="off"></label>
-    <label>Title <input id="p-title" required maxlength="64"></label>
+    <label class="field" id="p-sku-field">
+      <span>SKU</span>
+      <input id="p-sku" required placeholder="win11-key" autocomplete="off">
+      <small class="hint">2–64 chars: letters, digits, - or _. Cannot change later.</small>
+    </label>
+    <label class="field">
+      <span>Title</span>
+      <input id="p-title" required maxlength="64">
+    </label>
     <div class="row">
-      <label>Stars price <input id="p-price" type="number" min="1" step="1" required></label>
-      <label>Category <input id="p-category" placeholder="general"></label>
+      <label class="field">
+        <span>Stars price</span>
+        <input id="p-price" type="number" min="1" max="100000" step="1" required>
+      </label>
+      <label class="field">
+        <span>Category</span>
+        <input id="p-category" placeholder="general" maxlength="64">
+      </label>
     </div>
-    <label>Description <textarea id="p-description" maxlength="500" rows="3"></textarea></label>
+    <label class="field">
+      <span>Description</span>
+      <textarea id="p-description" maxlength="500" rows="3"></textarea>
+    </label>
     <div class="dialog-actions">
-      <button type="button" id="product-cancel" class="ghost" value="cancel">Cancel</button>
-      <button type="submit" class="primary" id="product-save">Create</button>
+      <button type="button" id="product-cancel" class="btn ghost">Cancel</button>
+      <button type="submit" class="btn primary" id="product-save">Create</button>
     </div>
-    <p class="error" id="product-error" hidden></p>
+    <p class="form-error" id="product-error" hidden></p>
   </form>
 </dialog>
 
-<dialog id="confirm-dialog">
+<!-- ============ CONFIRM DIALOG ============ -->
+<dialog id="confirm-dialog" class="modal">
   <form method="dialog" id="confirm-form">
-    <h3 id="confirm-title">Confirm</h3>
+    <h3 id="confirm-title" class="display">Confirm</h3>
     <p id="confirm-body"></p>
     <div class="dialog-actions">
-      <button type="button" id="confirm-cancel" class="ghost">Cancel</button>
-      <button type="submit" id="confirm-ok" class="danger">Confirm</button>
+      <button type="button" id="confirm-cancel" class="btn ghost">Cancel</button>
+      <button type="submit" id="confirm-ok" class="btn danger">Confirm</button>
     </div>
   </form>
 </dialog>

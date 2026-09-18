@@ -1,4 +1,4 @@
-/* Owner console — Supabase Auth for sign-in, Worker /admin/api for everything else. */
+/* Digital Shelf owner console — Supabase Auth for sign-in, Worker /admin/api for data. */
 "use strict";
 
 const SUPABASE_URL = `https://${CONFIG.projectRef}.supabase.co`;
@@ -7,8 +7,14 @@ const TOKEN_KEY = "ds_session";
 
 let session = JSON.parse(sessionStorage.getItem(TOKEN_KEY) || "null");
 let productsCache = [];
+let stockCache = [];
+let stockStateFilter = "";
+let orderStateFilter = "";
 let pendingConfirm = null;
 
+const $ = (id) => document.getElementById(id);
+
+/* ---------- session ---------- */
 function token() {
   return session && session.access_token;
 }
@@ -20,15 +26,6 @@ function saveSession(data) {
     expires_at: Date.now() + (Number(data.expires_in || 3600) - 30) * 1000,
   };
   sessionStorage.setItem(TOKEN_KEY, JSON.stringify(session));
-}
-
-function toast(msg, isError = false) {
-  const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.className = isError ? "error" : "";
-  el.hidden = false;
-  clearTimeout(el._t);
-  el._t = setTimeout(() => (el.hidden = true), 4000);
 }
 
 async function refreshSession() {
@@ -82,16 +79,86 @@ async function signIn(email, password) {
 function signOut() {
   session = null;
   sessionStorage.removeItem(TOKEN_KEY);
-  document.getElementById("shell").hidden = true;
-  document.getElementById("login-screen").hidden = false;
+  $("shell").hidden = true;
+  $("login-screen").hidden = false;
 }
 
-function showView(name) {
+/* ---------- helpers ---------- */
+function toast(msg, isError = false) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = isError ? "error" : "";
+  el.hidden = false;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => (el.hidden = true), 4200);
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function timeAgo(iso) {
+  if (!iso) return "—";
+  const seconds = Math.max(1, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = seconds / 60;
+  if (minutes < 60) return `${Math.floor(minutes)}m ago`;
+  const hours = minutes / 60;
+  if (hours < 24) return `${Math.floor(hours)}h ago`;
+  const days = hours / 24;
+  if (days < 30) return `${Math.floor(days)}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function confirmAction(title, body, okLabel = "Confirm") {
+  return new Promise((resolve) => {
+    pendingConfirm = resolve;
+    $("confirm-title").textContent = title;
+    $("confirm-body").textContent = body;
+    $("confirm-ok").textContent = okLabel;
+    $("confirm-dialog").showModal();
+  });
+}
+
+function skeletons(target, count, height) {
+  target.innerHTML = Array.from(
+    { length: count },
+    () => `<div class="skeleton" style="height:${height}px"></div>`,
+  ).join("");
+}
+
+const ORDER_BADGE = {
+  delivered: "ok",
+  delivering: "info",
+  paid: "info",
+  invoice: "dim",
+  checkout: "dim",
+  expired: "dim",
+  cancelled: "dim",
+  refunded: "dim",
+  delivery_failed: "warn",
+  needs_refund: "bad",
+  refund_pending: "bad",
+};
+
+const STOCK_BADGE = { available: "ok", reserved: "info", sold: "dim", quarantined: "bad" };
+
+function stockBadge(state) {
+  return `<span class="badge ${STOCK_BADGE[state] || "dim"}">${esc(state)}</span>`;
+}
+
+function orderBadge(state) {
+  return `<span class="badge ${ORDER_BADGE[state] || "dim"}">${esc(state.replace(/_/g, " "))}</span>`;
+}
+
+/* ---------- navigation ---------- */
+function showView(name, { deferLoad = false } = {}) {
   for (const s of document.querySelectorAll("main section")) s.hidden = true;
-  document.getElementById(`view-${name}`).hidden = false;
+  $(`view-${name}`).hidden = false;
   for (const b of document.querySelectorAll("#nav button[data-view]"))
     b.classList.toggle("active", b.dataset.view === name);
-  loadView(name);
+  if (!deferLoad) loadView(name);
 }
 
 async function loadView(name) {
@@ -106,286 +173,471 @@ async function loadView(name) {
   }
 }
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-function confirmAction(title, body, okLabel = "Confirm") {
-  return new Promise((resolve) => {
-    pendingConfirm = resolve;
-    document.getElementById("confirm-title").textContent = title;
-    document.getElementById("confirm-body").textContent = body;
-    document.getElementById("confirm-ok").textContent = okLabel;
-    document.getElementById("confirm-dialog").showModal();
-  });
-}
-
-/* ---- Overview ---- */
+/* ---------- overview ---------- */
 async function loadOverview() {
-  const o = await api("overview");
-  document.getElementById("shop-status").textContent = o.checkout_paused ? "checkout paused" : "checkout open";
-  const cards = [
-    ["Active products", `${o.products.active} / ${o.products.total}`],
-    ["Available stock", o.stock.available],
-    ["Sold", o.stock.sold],
-    ["Quarantined", o.stock.quarantined],
-    ["Paid orders", o.orders.paid],
-    ["Pending delivery", o.orders.pending_delivery],
-    ["Refund queue", o.orders.needs_refund],
-    ["Checkout", o.checkout_paused ? "paused" : "open"],
-  ];
-  document.getElementById("overview-cards").innerHTML = cards
-    .map(([k, v]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`)
-    .join("");
+  skeletons($("overview-cards"), 4, 84);
+  const [o, products] = await Promise.all([api("overview"), api("products")]);
+  productsCache = products;
 
-  const banner = document.getElementById("setup-banner");
-  if (!o.products.total) {
+  const pill = $("shop-status");
+  pill.textContent = o.checkout_paused ? "checkout paused" : "checkout open";
+  pill.classList.toggle("paused", !!o.checkout_paused);
+
+  const banner = $("setup-banner");
+  if (o.products.active === 0) {
+    banner.textContent = "No products are visible to buyers yet. Create a product, upload stock, then activate it.";
     banner.hidden = false;
-    banner.innerHTML = `<strong>The shop is empty.</strong> Buyers will see no catalog until you finish this:
-      <ol>
-        <li>Create a product — it stays hidden</li>
-        <li>Upload license codes or download URLs</li>
-        <li>Activate — it appears in Telegram immediately</li>
-      </ol>`;
-  } else if (!o.products.active) {
-    banner.hidden = false;
-    banner.innerHTML = `<strong>Products exist, none are live.</strong> Upload stock if needed, then activate a product to show it in @velmorabazaar_bot.`;
   } else {
     banner.hidden = true;
   }
 
+  const cards = [
+    { label: "active products", value: `${o.products.active}/${o.products.total}` },
+    { label: "codes in stock", value: o.stock.available, accent: true },
+    { label: "paid orders", value: o.orders.paid },
+    { label: "awaiting delivery", value: o.orders.pending_delivery, alert: o.orders.pending_delivery > 0 },
+    { label: "need refund", value: o.orders.needs_refund, alert: o.orders.needs_refund > 0 },
+    { label: "payment reviews", value: o.review_alerts, alert: o.review_alerts > 0 },
+    { label: "failed updates", value: o.failed_updates, alert: o.failed_updates > 0 },
+    { label: "open invoices", value: o.orders.open_invoices },
+  ];
+  $("overview-cards").innerHTML = cards
+    .map(
+      (c, i) => `
+      <div class="stat-card${c.accent ? " accent" : ""}${c.alert ? " alert" : ""}" style="animation-delay:${i * 40}ms">
+        <span class="stat-value">${esc(c.value)}</span>
+        <span class="stat-label">${esc(c.label)}</span>
+      </div>`,
+    )
+    .join("");
+
   const alerts = [];
-  if (o.review_alerts) alerts.push(`${o.review_alerts} payment event(s) need review`);
-  if (o.failed_updates) alerts.push(`${o.failed_updates} webhook update(s) failed permanently`);
-  if (o.orders.needs_refund) alerts.push(`${o.orders.needs_refund} order(s) are owed a refund`);
-  if (o.orders.pending_delivery) alerts.push(`${o.orders.pending_delivery} paid order(s) awaiting delivery`);
-  document.getElementById("overview-alerts").innerHTML = alerts.length
-    ? `<ul>${alerts.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>`
-    : `<p class="hint">Nothing waiting. Create a product when you are ready to sell.</p>`;
+  if (o.orders.needs_refund > 0)
+    alerts.push({ text: "orders are waiting on a refund decision", count: o.orders.needs_refund, view: "orders" });
+  if (o.orders.pending_delivery > 0)
+    alerts.push({ text: "paid orders are stuck or failed delivery", count: o.orders.pending_delivery, view: "orders" });
+  if (o.review_alerts > 0)
+    alerts.push({ text: "payment events need review (wrong amount, unknown order, replay)", count: o.review_alerts, view: "orders" });
+  if (o.failed_updates > 0)
+    alerts.push({ text: "Telegram updates failed permanently", count: o.failed_updates });
+  $("overview-alerts").innerHTML = alerts.length
+    ? alerts
+        .map(
+          (a) => `
+        <div class="alert-row">
+          <span><b class="count">${esc(a.count)}</b> ${esc(a.text)}</span>
+          ${a.view ? `<button class="btn small ghost" data-goto="${a.view}">View</button>` : ""}
+        </div>`,
+        )
+        .join("")
+    : `<div class="empty-state">All clear — nothing needs your attention.</div>`;
+
+  const low = products.filter((p) => p.active && p.source === "stock" && p.available <= 3);
+  $("overview-lowstock").innerHTML = low.length
+    ? low
+        .map(
+          (p) => `
+        <div class="lowstock-row">
+          <span>${esc(p.title)} <span class="mono">${esc(p.sku)}</span></span>
+          <span>
+            <b class="mono" style="color:var(--red)">${esc(p.available)}</b> left
+            <button class="btn small" data-addstock="${esc(p.sku)}">Add stock</button>
+          </span>
+        </div>`,
+        )
+        .join("")
+    : `<div class="empty-state">Stock levels look healthy.</div>`;
 }
 
-/* ---- Products ---- */
+/* ---------- products ---------- */
 async function loadProducts() {
-  productsCache = await api("products");
-  const el = document.getElementById("products-list");
-  if (!productsCache.length) {
-    el.innerHTML = `<div class="panel empty">No products yet. Create one — it will stay inactive until stock is loaded.</div>`;
+  const el = $("products-list");
+  skeletons(el, 3, 150);
+  const products = await api("products");
+  productsCache = products;
+  if (!products.length) {
+    el.innerHTML = `<div class="panel empty-state">No products yet. Hit “New product” to create your first one.</div>`;
     return;
   }
-  el.innerHTML = productsCache.map((p) => `
-    <div class="item">
-      <div>
-        <b>${esc(p.title)}</b> <code>${esc(p.sku)}</code>
-        <span class="badge ${p.active ? "ok" : "warn"}">${p.active ? "live in Telegram" : "hidden"}</span>
-        <div class="meta">${esc(p.price_stars)} Stars · ${esc(p.available)} available · ${esc(p.sold)} sold · ${esc(p.quarantined)} quarantined</div>
-        <div class="meta">${esc(p.description || "")}</div>
-      </div>
-      <div class="actions">
-        <button data-act="stock" data-sku="${esc(p.sku)}">Add stock</button>
-        <button data-act="edit" data-sku="${esc(p.sku)}">Edit</button>
-        <button data-act="toggle" data-sku="${esc(p.sku)}" data-active="${p.active}" class="${p.active ? "" : "primary"}">
-          ${p.active ? "Hide" : "Activate"}</button>
-      </div>
-    </div>`).join("");
+  el.innerHTML = products
+    .map((p, i) => {
+      const status = p.active
+        ? `<span class="badge ok">live in shop</span>`
+        : `<span class="badge dim">hidden</span>`;
+      const counts =
+        p.source === "stock"
+          ? `<span class="${p.available <= 3 && p.active ? "low" : ""}"><b>${esc(p.available)}</b> available</span>
+             <span><b>${esc(p.sold)}</b> sold</span>
+             <span><b>${esc(p.quarantined)}</b> quarantined</span>`
+          : `<span>supplier-fed</span>`;
+      return `
+      <div class="product-card" style="animation-delay:${i * 35}ms">
+        <div class="pc-top">
+          <div>
+            <h4>${esc(p.title)}</h4>
+            <code>${esc(p.sku)}</code>
+          </div>
+          <span class="pc-price">★ ${esc(p.price_stars)}</span>
+        </div>
+        <p class="pc-desc">${esc(p.description || "No description.")}</p>
+        <div class="pc-counts">${counts}<span class="badge info">${esc(p.category)}</span>${status}</div>
+        <div class="pc-actions">
+          <button class="btn small" data-edit="${esc(p.sku)}">Edit</button>
+          ${p.source === "stock" ? `<button class="btn small" data-addstock="${esc(p.sku)}">Add stock</button>` : ""}
+          <button class="btn small ${p.active ? "ghost" : "primary"}" data-toggle="${esc(p.sku)}">
+            ${p.active ? "Hide from shop" : "Activate"}
+          </button>
+        </div>
+      </div>`;
+    })
+    .join("");
 }
 
 function openProductDialog(product) {
-  const editing = Boolean(product);
-  document.getElementById("p-mode").value = editing ? "edit" : "create";
-  document.getElementById("product-dialog-title").textContent = editing ? "Edit product" : "New product";
-  document.getElementById("product-dialog-hint").textContent = editing
-    ? "Price and title changes apply to new orders only. Existing orders keep their snapshot."
-    : "Created inactive. Upload stock, then activate.";
-  document.getElementById("p-sku").value = product ? product.sku : "";
-  document.getElementById("p-sku").disabled = editing;
-  document.getElementById("p-title").value = product ? product.title : "";
-  document.getElementById("p-price").value = product ? product.price_stars : "";
-  document.getElementById("p-category").value = product ? product.category : "general";
-  document.getElementById("p-description").value = product ? product.description || "" : "";
-  document.getElementById("product-save").textContent = editing ? "Save" : "Create";
-  document.getElementById("product-error").hidden = true;
-  document.getElementById("product-dialog").showModal();
+  const isEdit = !!product;
+  $("p-mode").value = isEdit ? "edit" : "create";
+  $("product-dialog-title").textContent = isEdit ? `Edit ${product.title}` : "New product";
+  $("product-dialog-hint").textContent = isEdit
+    ? "Price, title, category and description."
+    : "Created hidden. Upload stock, then activate.";
+  $("p-sku-field").style.display = isEdit ? "none" : "";
+  $("p-sku").required = !isEdit;
+  $("p-sku").value = product ? product.sku : "";
+  $("p-title").value = product ? product.title : "";
+  $("p-price").value = product ? product.price_stars : "";
+  $("p-category").value = product ? product.category : "";
+  $("p-description").value = product ? product.description || "" : "";
+  $("product-save").textContent = isEdit ? "Save changes" : "Create";
+  $("product-error").hidden = true;
+  $("product-dialog").showModal();
 }
 
-document.getElementById("new-product").addEventListener("click", () => openProductDialog(null));
-document.getElementById("product-cancel").addEventListener("click", () => {
-  document.getElementById("product-dialog").close();
-});
+/* ---------- stock ---------- */
+async function loadStock(prefer) {
+  if (!productsCache.length) productsCache = await api("products");
+  const select = $("s-sku");
+  const stockProducts = productsCache.filter((p) => p.source === "stock");
+  select.innerHTML = stockProducts.length
+    ? stockProducts
+        .map(
+          (p) =>
+            `<option value="${esc(p.sku)}">${esc(p.title)} (${esc(p.sku)}) — ${esc(p.available)} available</option>`,
+        )
+        .join("")
+    : `<option value="">create a product first</option>`;
+  if (prefer && stockProducts.some((p) => p.sku === prefer)) select.value = prefer;
+  renderStockStateChips();
+  await loadStockList();
+}
 
-document.getElementById("product-form").addEventListener("submit", async (e) => {
+function renderStockStateChips() {
+  const states = ["", "available", "reserved", "sold", "quarantined"];
+  $("stock-state-filter").innerHTML = states
+    .map(
+      (s) =>
+        `<button class="chip${stockStateFilter === s ? " active" : ""}" data-state="${s}">${s || "all"}</button>`,
+    )
+    .join("");
+}
+
+async function loadStockList() {
+  const el = $("stock-list");
+  const sku = $("s-sku").value;
+  if (!sku) {
+    el.innerHTML = "";
+    return;
+  }
+  skeletons(el, 4, 34);
+  stockCache = await api(`stock?sku=${encodeURIComponent(sku)}`);
+  renderStockList();
+}
+
+function renderStockList() {
+  const el = $("stock-list");
+  const rows = stockStateFilter
+    ? stockCache.filter((r) => r.state === stockStateFilter)
+    : stockCache;
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty-state">Nothing here yet — upload some codes.</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <table class="stock-table">
+      <thead><tr><th>fingerprint</th><th>state</th><th>uploaded</th><th>assigned</th></tr></thead>
+      <tbody>${rows
+        .map(
+          (r) => `<tr>
+            <td class="mono">${esc(r.fingerprint)}…</td>
+            <td>${stockBadge(r.state)}</td>
+            <td class="mono">${esc(timeAgo(r.created_at))}</td>
+            <td>${r.assigned ? "✓" : "—"}</td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table>`;
+}
+
+function updateLineCount() {
+  const lines = $("s-lines").value.split("\n").map((l) => l.trim()).filter(Boolean);
+  $("s-count").textContent = lines.length ? `${lines.length} line${lines.length === 1 ? "" : "s"}` : "";
+}
+
+/* ---------- orders ---------- */
+const ORDER_STATES = ["", "invoice", "checkout", "expired", "delivering", "delivered", "delivery_failed", "needs_refund", "refunded"];
+
+function renderOrderChips() {
+  $("o-state-chips").innerHTML = ORDER_STATES.map(
+    (s) =>
+      `<button class="chip${orderStateFilter === s ? " active" : ""}" data-state="${s}">${s ? s.replace(/_/g, " ") : "all"}</button>`,
+  ).join("");
+}
+
+async function loadOrders() {
+  const el = $("orders-list");
+  skeletons(el, 4, 66);
+  renderOrderChips();
+  const params = new URLSearchParams();
+  if (orderStateFilter) params.set("state", orderStateFilter);
+  const q = $("o-q").value.trim();
+  if (q) params.set("q", q);
+  const orders = await api(`orders?${params}`);
+  if (!orders.length) {
+    el.innerHTML = `<div class="panel empty-state">No orders match. They appear here after a Stars payment.</div>`;
+    return;
+  }
+  el.innerHTML = orders
+    .map(
+      (o, i) => `
+    <div class="order-card" style="animation-delay:${i * 25}ms">
+      <div class="oc-main">
+        <span class="oc-title">${esc(o.title)}</span>${orderBadge(o.state)}
+        <div class="oc-meta">
+          <code>${esc(o.id)}</code> · ★ ${esc(o.price_stars)} · buyer <span class="mono">${esc(o.user_id)}</span> · ${esc(timeAgo(o.created_at))}
+          ${o.delivery_attempts > 1 ? ` · ${esc(o.delivery_attempts)} delivery attempts` : ""}
+          ${o.error_code ? ` · <span style="color:var(--red)">${esc(o.error_code)}</span>` : ""}
+          ${o.payment_status === "review" ? ` · <span class="badge bad">payment review</span>` : ""}
+        </div>
+      </div>
+      <div class="oc-actions">
+        ${["delivering", "delivery_failed", "delivered"].includes(o.state)
+          ? `<button class="btn small" data-act="resend" data-id="${esc(o.id)}">Resend same code</button>` : ""}
+        ${o.charge_id && o.state !== "refunded"
+          ? `<button class="btn small danger" data-act="refund" data-id="${esc(o.id)}">Refund</button>` : ""}
+      </div>
+    </div>`,
+    )
+    .join("");
+}
+
+/* ---------- settings ---------- */
+const SETTING_KEYS = ["shop_name", "support_contact", "terms_text", "privacy_text", "checkout_paused"];
+
+async function loadSettings() {
+  const s = await api("settings");
+  for (const key of SETTING_KEYS) {
+    const el = $(`set-${key}`);
+    if (el.type === "checkbox") el.checked = s[key] === "true";
+    else el.value = s[key] || "";
+  }
+  updatePauseLabel();
+}
+
+function updatePauseLabel() {
+  const paused = $("set-checkout_paused").checked;
+  $("pause-label").textContent = paused ? "Paused" : "Open";
+  $("pause-label").style.color = paused ? "var(--gold)" : "var(--green)";
+}
+
+async function saveSettings() {
+  const body = {};
+  for (const key of SETTING_KEYS) {
+    const el = $(`set-${key}`);
+    body[key] = el.type === "checkbox" ? el.checked : el.value;
+  }
+  const r = await api("settings/update", { method: "POST", body });
+  $("settings-result").textContent = r.terms_changed ? `Saved. ${r.note}` : "Saved.";
+  $("terms-warning").hidden = true;
+  const pill = $("shop-status");
+  pill.textContent = body.checkout_paused ? "checkout paused" : "checkout open";
+  pill.classList.toggle("paused", !!body.checkout_paused);
+  toast("Settings saved");
+}
+
+/* ---------- events ---------- */
+$("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const errEl = document.getElementById("product-error");
+  const errEl = $("login-error");
   errEl.hidden = true;
-  const editing = document.getElementById("p-mode").value === "edit";
-  const body = {
-    sku: document.getElementById("p-sku").value.trim(),
-    title: document.getElementById("p-title").value.trim(),
-    description: document.getElementById("p-description").value.trim(),
-    category: document.getElementById("p-category").value.trim() || "general",
-    price_stars: parseInt(document.getElementById("p-price").value, 10),
-  };
   try {
-    if (editing) await api("products/update", { method: "POST", body });
-    else await api("products/create", { method: "POST", body });
-    document.getElementById("product-dialog").close();
-    toast(editing ? "Product saved" : "Product created (hidden until you activate it)");
-    if (!editing) {
-      document.getElementById("s-sku").dataset.prefer = body.sku;
-      showView("stock");
-    } else {
-      loadProducts();
-    }
+    await signIn($("login-email").value, $("login-password").value);
+    $("login-screen").hidden = true;
+    $("shell").hidden = false;
+    showView("overview");
   } catch (err) {
     errEl.textContent = err.message;
     errEl.hidden = false;
   }
 });
 
-document.getElementById("products-list").addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-act]");
-  if (!btn) return;
-  const sku = btn.dataset.sku;
-  const product = productsCache.find((p) => p.sku === sku);
+$("logout").addEventListener("click", signOut);
+for (const b of document.querySelectorAll("#nav button[data-view]"))
+  b.addEventListener("click", () => showView(b.dataset.view));
+
+$("overview-refresh").addEventListener("click", () => loadView("overview"));
+document.querySelector("#view-overview").addEventListener("click", (e) => {
+  const goto = e.target.closest("[data-goto]");
+  if (goto) showView(goto.dataset.goto);
+  const addstock = e.target.closest("[data-addstock]");
+  if (addstock) {
+    showView("stock", { deferLoad: true });
+    loadStock(addstock.dataset.addstock).catch((err) => toast(err.message, true));
+  }
+});
+
+$("new-product").addEventListener("click", () => openProductDialog(null));
+$("product-cancel").addEventListener("click", () => $("product-dialog").close());
+$("product-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errEl = $("product-error");
+  errEl.hidden = true;
+  const mode = $("p-mode").value;
+  const price = Number($("p-price").value);
+  const body = {
+    sku: $("p-sku").value.trim(),
+    title: $("p-title").value.trim(),
+    description: $("p-description").value.trim(),
+    category: $("p-category").value.trim() || "general",
+    price_stars: Number.isInteger(price) ? price : 0,
+  };
   try {
-    if (btn.dataset.act === "edit") {
-      openProductDialog(product);
-      return;
+    if (mode === "edit") {
+      const original = productsCache.find((p) => p.sku === body.sku);
+      const changes = { sku: body.sku };
+      if (original) {
+        for (const key of ["title", "description", "category", "price_stars"])
+          if (body[key] !== original[key]) changes[key] = body[key];
+      }
+      await api("products/update", { method: "POST", body: changes });
+      toast("Product updated");
+    } else {
+      await api("products/create", { method: "POST", body });
+      toast("Product created — hidden until you add stock and activate it");
     }
-    if (btn.dataset.act === "stock") {
-      document.getElementById("s-sku").dataset.prefer = sku;
-      showView("stock");
-      return;
-    }
-    if (btn.dataset.act === "toggle") {
-      const makingLive = btn.dataset.active !== "true";
-      if (makingLive && product && product.available < 1) {
-        toast("Upload stock before activating — buyers would see an empty listing.", true);
-        document.getElementById("s-sku").dataset.prefer = sku;
-        showView("stock");
-        return;
+    $("product-dialog").close();
+    await loadProducts();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.hidden = false;
+  }
+});
+
+$("products-list").addEventListener("click", async (e) => {
+  const edit = e.target.closest("[data-edit]");
+  const addstock = e.target.closest("[data-addstock]");
+  const toggle = e.target.closest("[data-toggle]");
+  try {
+    if (edit) {
+      const product = productsCache.find((p) => p.sku === edit.dataset.edit);
+      if (product) openProductDialog(product);
+    } else if (addstock) {
+      showView("stock", { deferLoad: true });
+      await loadStock(addstock.dataset.addstock);
+    } else if (toggle) {
+      const product = productsCache.find((p) => p.sku === toggle.dataset.toggle);
+      if (!product) return;
+      if (!product.active) {
+        const ok = await confirmAction(
+          `Activate “${product.title}”?`,
+          product.available > 0
+            ? `It becomes visible in the shop with ${product.available} codes in stock.`
+            : "It becomes visible in the shop.",
+          "Activate",
+        );
+        if (!ok) return;
       }
       await api("products/update", {
         method: "POST",
-        body: { sku, active: makingLive },
+        body: { sku: product.sku, active: !product.active },
       });
-      toast(makingLive ? "Live in Telegram" : "Hidden from buyers");
-      loadProducts();
+      toast(product.active ? "Product hidden from buyers" : "Product is live");
+      await loadProducts();
     }
   } catch (err) {
     toast(err.message, true);
   }
 });
 
-/* ---- Stock ---- */
-async function loadStock() {
-  productsCache = await api("products");
-  const stockProducts = productsCache.filter((p) => p.source === "stock");
-  const select = document.getElementById("s-sku");
-  const prefer = select.dataset.prefer;
-  select.innerHTML = stockProducts
-    .map((p) => `<option value="${esc(p.sku)}">${esc(p.title)} (${esc(p.sku)}) — ${esc(p.available)} available</option>`)
-    .join("") || `<option value="">Create a product first</option>`;
-  if (prefer && stockProducts.some((p) => p.sku === prefer)) select.value = prefer;
-  delete select.dataset.prefer;
-  await loadStockList();
-}
-
-async function loadStockList() {
-  const sku = document.getElementById("s-sku").value;
-  const el = document.getElementById("stock-list");
-  if (!sku) {
-    el.innerHTML = `<p class="empty">Create a product first.</p>`;
-    return;
-  }
-  const rows = await api(`stock?sku=${encodeURIComponent(sku)}`);
-  if (!rows.length) {
-    el.innerHTML = `<p class="empty">No inventory for this SKU yet.</p>`;
-    return;
-  }
-  el.innerHTML = `<table>
-    <thead><tr><th>Fingerprint</th><th>State</th><th>Added</th></tr></thead>
-    <tbody>${rows.map((r) => `<tr>
-      <td><code>${esc(r.fingerprint)}</code></td>
-      <td><span class="badge ${r.state === "available" ? "ok" : r.state === "quarantined" ? "bad" : ""}">${esc(r.state)}</span></td>
-      <td>${esc(new Date(r.created_at).toLocaleString())}</td>
-    </tr>`).join("")}</tbody>
-  </table>`;
-}
-
-document.getElementById("s-sku").addEventListener("change", () => {
+$("s-sku").addEventListener("change", () => {
+  stockStateFilter = "";
+  renderStockStateChips();
   loadStockList().catch((err) => toast(err.message, true));
 });
-
-document.getElementById("s-file").addEventListener("change", async (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  document.getElementById("s-lines").value = await file.text();
+$("stock-state-filter").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  stockStateFilter = chip.dataset.state;
+  renderStockStateChips();
+  renderStockList();
 });
-
-const drop = document.getElementById("dropzone");
-drop.addEventListener("dragover", (e) => { e.preventDefault(); });
+$("s-lines").addEventListener("input", updateLineCount);
+$("s-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    $("s-lines").value = await file.text();
+    updateLineCount();
+  }
+  e.target.value = "";
+});
+const drop = $("dropzone");
+drop.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  drop.classList.add("over");
+});
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", async (e) => {
   e.preventDefault();
-  const file = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (!file) return;
-  document.getElementById("s-lines").value = await file.text();
+  drop.classList.remove("over");
+  const file = e.dataTransfer.files[0];
+  if (file) {
+    $("s-lines").value = await file.text();
+    updateLineCount();
+  }
 });
-
-document.getElementById("stock-form").addEventListener("submit", async (e) => {
+$("stock-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const sku = document.getElementById("s-sku").value;
-  const lines = document.getElementById("s-lines").value.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (!sku) return toast("Create a product first", true);
-  if (!lines.length) return toast("Paste or drop at least one code", true);
+  const sku = $("s-sku").value;
+  const lines = $("s-lines").value.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) {
+    toast("Paste or drop at least one line", true);
+    return;
+  }
   try {
     const r = await api("stock/upload", { method: "POST", body: { sku, lines } });
-    document.getElementById("stock-result").textContent =
-      `Accepted ${r.accepted} · duplicates ${r.duplicates} · rejected ${r.rejected}`;
-    document.getElementById("s-lines").value = "";
-    document.getElementById("s-file").value = "";
-    toast("Stock encrypted and stored");
-    await loadStock();
+    $("stock-result").textContent =
+      `Added ${r.accepted}, skipped ${r.duplicates} duplicates` +
+      (r.rejected ? `, rejected ${r.rejected}` : "") + ".";
+    $("s-lines").value = "";
+    updateLineCount();
+    toast(`Stock uploaded: ${r.accepted} new codes`);
+    productsCache = await api("products");
+    await loadStock(sku);
   } catch (err) {
     toast(err.message, true);
   }
 });
 
-/* ---- Orders ---- */
-async function loadOrders() {
-  const params = new URLSearchParams();
-  const state = document.getElementById("o-state").value;
-  const q = document.getElementById("o-q").value.trim();
-  if (state) params.set("state", state);
-  if (q) params.set("q", q);
-  const orders = await api(`orders?${params}`);
-  const el = document.getElementById("orders-list");
-  if (!orders.length) {
-    el.innerHTML = `<div class="panel empty">No orders yet. They appear here after a Stars payment.</div>`;
-    return;
-  }
-  el.innerHTML = orders.map((o) => `
-    <div class="item">
-      <div>
-        <code>${esc(o.id)}</code> <b>${esc(o.title)}</b>
-        <span class="badge ${o.state === "delivered" ? "ok" : /fail|refund/.test(o.state) ? "bad" : "warn"}">${esc(o.state)}</span>
-        <div class="meta">${esc(o.price_stars)} Stars · buyer ${esc(o.user_id)} · ${esc(new Date(o.created_at).toLocaleString())}${
-          o.error_code ? ` · ${esc(o.error_code)}` : ""
-        }</div>
-      </div>
-      <div class="actions">
-        ${["delivering", "delivery_failed", "delivered"].includes(o.state)
-          ? `<button data-act="resend" data-id="${esc(o.id)}">Resend same code</button>` : ""}
-        ${o.charge_id && o.state !== "refunded"
-          ? `<button data-act="refund" data-id="${esc(o.id)}" class="danger">Refund</button>` : ""}
-      </div>
-    </div>`).join("");
-}
-
-document.getElementById("o-search").addEventListener("click", () => {
+$("o-search").addEventListener("click", () => loadOrders().catch((err) => toast(err.message, true)));
+$("o-q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") loadOrders().catch((err) => toast(err.message, true));
+});
+$("o-state-chips").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  orderStateFilter = chip.dataset.state;
   loadOrders().catch((err) => toast(err.message, true));
 });
-document.getElementById("orders-list").addEventListener("click", async (e) => {
+
+$("orders-list").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
   try {
@@ -414,79 +666,37 @@ document.getElementById("orders-list").addEventListener("click", async (e) => {
   }
 });
 
-document.getElementById("confirm-cancel").addEventListener("click", () => {
-  document.getElementById("confirm-dialog").close();
+$("confirm-cancel").addEventListener("click", () => {
+  $("confirm-dialog").close();
   if (pendingConfirm) pendingConfirm(false);
   pendingConfirm = null;
 });
-document.getElementById("confirm-form").addEventListener("submit", (e) => {
+$("confirm-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  document.getElementById("confirm-dialog").close();
+  $("confirm-dialog").close();
   if (pendingConfirm) pendingConfirm(true);
   pendingConfirm = null;
 });
-document.getElementById("confirm-dialog").addEventListener("close", () => {
+$("confirm-dialog").addEventListener("close", () => {
   if (pendingConfirm) pendingConfirm(false);
   pendingConfirm = null;
 });
 
-/* ---- Settings ---- */
-const SETTING_KEYS = ["shop_name", "support_contact", "terms_text", "privacy_text", "checkout_paused"];
-
-async function loadSettings() {
-  const s = await api("settings");
-  for (const key of SETTING_KEYS) {
-    const el = document.getElementById(`set-${key}`);
-    if (el.type === "checkbox") el.checked = s[key] === "true";
-    else el.value = s[key] || "";
-  }
-}
-
-document.getElementById("set-terms_text").addEventListener("input", () => {
-  document.getElementById("terms-warning").hidden = false;
-});
-document.getElementById("set-privacy_text").addEventListener("input", () => {
-  document.getElementById("terms-warning").hidden = false;
-});
-document.getElementById("settings-form").addEventListener("submit", async (e) => {
+$("set-checkout_paused").addEventListener("change", updatePauseLabel);
+$("set-terms_text").addEventListener("input", () => ($("terms-warning").hidden = false));
+$("set-privacy_text").addEventListener("input", () => ($("terms-warning").hidden = false));
+$("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = {};
-  for (const key of SETTING_KEYS) {
-    const el = document.getElementById(`set-${key}`);
-    body[key] = el.type === "checkbox" ? el.checked : el.value;
-  }
   try {
-    const r = await api("settings/update", { method: "POST", body });
-    document.getElementById("settings-result").textContent = r.terms_changed ? `Saved. ${r.note}` : "Saved.";
-    document.getElementById("terms-warning").hidden = true;
-    document.getElementById("shop-status").textContent = body.checkout_paused ? "checkout paused" : "checkout open";
-    toast("Settings saved");
+    await saveSettings();
   } catch (err) {
     toast(err.message, true);
   }
 });
 
-/* ---- wiring ---- */
-document.getElementById("login-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const errEl = document.getElementById("login-error");
-  errEl.hidden = true;
-  try {
-    await signIn(document.getElementById("login-email").value, document.getElementById("login-password").value);
-    document.getElementById("login-screen").hidden = true;
-    document.getElementById("shell").hidden = false;
-    showView("overview");
-  } catch (err) {
-    errEl.textContent = err.message;
-    errEl.hidden = false;
-  }
-});
-document.getElementById("logout").addEventListener("click", signOut);
-for (const b of document.querySelectorAll("#nav button[data-view]"))
-  b.addEventListener("click", () => showView(b.dataset.view));
-
+/* ---------- boot ---------- */
 if (token()) {
-  document.getElementById("login-screen").hidden = true;
-  document.getElementById("shell").hidden = false;
+  $("login-screen").hidden = true;
+  $("shell").hidden = false;
   showView("overview");
 }
