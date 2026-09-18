@@ -3,9 +3,42 @@
 import hashlib
 import hmac
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Sequence
 
 from cryptography.fernet import Fernet, InvalidToken
+
+
+class InventoryState(StrEnum):
+    AVAILABLE = "available"
+    RESERVED = "reserved"
+    SOLD = "sold"
+    QUARANTINED = "quarantined"
+    RETIRED = "retired"
+
+
+class InvalidInventoryTransition(Exception):
+    """A state change would reactivate or skip a required inventory state."""
+
+
+_ALLOWED_TRANSITIONS = {
+    (InventoryState.AVAILABLE, InventoryState.RESERVED),
+    (InventoryState.RESERVED, InventoryState.AVAILABLE),
+    (InventoryState.RESERVED, InventoryState.SOLD),
+    (InventoryState.SOLD, InventoryState.QUARANTINED),
+    (InventoryState.AVAILABLE, InventoryState.RETIRED),
+}
+
+
+def transition_inventory_state(
+    current: InventoryState,
+    requested: InventoryState,
+) -> InventoryState:
+    if current is requested:
+        return requested
+    if (current, requested) not in _ALLOWED_TRANSITIONS:
+        raise InvalidInventoryTransition(f"{current.value} -> {requested.value} is not allowed")
+    return requested
 
 
 @dataclass(frozen=True)

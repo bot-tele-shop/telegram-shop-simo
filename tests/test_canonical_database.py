@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -20,7 +21,11 @@ from digital_shelf.catalog_admin import DatabaseCatalogStore
 from digital_shelf.db import create_engine, database_ready
 from digital_shelf.features import FeatureKey, FeatureState
 from digital_shelf.inventory import InventoryCipher
-from digital_shelf.inventory_admin import DatabaseInventoryStore
+from digital_shelf.inventory_admin import (
+    DatabaseInventoryAllocator,
+    DatabaseInventoryStore,
+    InventoryUnavailableError,
+)
 from digital_shelf.store_settings import (
     DatabaseSettingStore,
     SettingRevisionConflictError,
@@ -362,6 +367,70 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                 )
             assert inventory_count == 1
             assert available_quantity == 1
+
+            allocator = DatabaseInventoryAllocator(engine)
+            item_id = None
+            async with engine.connect() as connection:
+                item_id = await connection.scalar(
+                    text(
+                        """
+                        SELECT id FROM digital_shelf.inventory_items
+                        WHERE product_id = :product_id AND state = 'available'
+                        """
+                    ),
+                    {"product_id": product_id},
+                )
+            assert item_id is not None
+            order_item_id = uuid4()
+            reservation = await allocator.reserve_one(
+                product_id=product_id,
+                order_item_id=order_item_id,
+                reserved_until=datetime.now(UTC) + timedelta(minutes=5),
+                correlation_id=uuid4(),
+            )
+            assert reservation.item_id == item_id
+            with pytest.raises(InventoryUnavailableError):
+                await allocator.reserve_one(
+                    product_id=product_id,
+                    order_item_id=uuid4(),
+                    reserved_until=datetime.now(UTC) + timedelta(minutes=5),
+                    correlation_id=uuid4(),
+                )
+            await allocator.confirm_sale(
+                item_id=reservation.item_id,
+                order_item_id=order_item_id,
+                correlation_id=uuid4(),
+            )
+            await allocator.quarantine_sold(
+                item_id=reservation.item_id,
+                correlation_id=uuid4(),
+            )
+            async with engine.connect() as connection:
+                final_state = await connection.scalar(
+                    text(
+                        """
+                        SELECT state FROM digital_shelf.inventory_items WHERE id = :item_id
+                        """
+                    ),
+                    {"item_id": reservation.item_id},
+                )
+                counters = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT available_quantity, reserved_quantity, sold_quantity
+                            FROM digital_shelf.inventory_counters WHERE product_id = :product_id
+                            """
+                        ),
+                        {"product_id": product_id},
+                    )
+                ).mappings().one()
+            assert final_state == "quarantined"
+            assert dict(counters) == {
+                "available_quantity": 0,
+                "reserved_quantity": 0,
+                "sold_quantity": 1,
+            }
         finally:
             await engine.dispose()
 

@@ -2,9 +2,12 @@ import pytest
 from cryptography.fernet import Fernet
 
 from digital_shelf.inventory import (
+    InvalidInventoryTransition,
     InventoryCipher,
     InventoryImporter,
     InventoryImportPreview,
+    InventoryState,
+    transition_inventory_state,
 )
 
 
@@ -61,3 +64,35 @@ def test_import_rejects_invalid_ciphertext() -> None:
 
     with pytest.raises(ValueError, match="ciphertext"):
         cipher.decrypt("not-a-fernet-token")
+
+
+@pytest.mark.parametrize(
+    ("current", "requested"),
+    [
+        (InventoryState.AVAILABLE, InventoryState.RESERVED),
+        (InventoryState.RESERVED, InventoryState.AVAILABLE),
+        (InventoryState.RESERVED, InventoryState.SOLD),
+        (InventoryState.SOLD, InventoryState.QUARANTINED),
+        (InventoryState.AVAILABLE, InventoryState.RETIRED),
+    ],
+)
+def test_inventory_state_transition_allows_only_forward_operational_moves(
+    current: InventoryState, requested: InventoryState
+) -> None:
+    assert transition_inventory_state(current, requested) is requested
+
+
+@pytest.mark.parametrize(
+    ("current", "requested"),
+    [
+        (InventoryState.SOLD, InventoryState.AVAILABLE),
+        (InventoryState.QUARANTINED, InventoryState.AVAILABLE),
+        (InventoryState.RETIRED, InventoryState.AVAILABLE),
+        (InventoryState.AVAILABLE, InventoryState.SOLD),
+    ],
+)
+def test_inventory_state_transition_rejects_reactivation_or_skips(
+    current: InventoryState, requested: InventoryState
+) -> None:
+    with pytest.raises(InvalidInventoryTransition):
+        transition_inventory_state(current, requested)
