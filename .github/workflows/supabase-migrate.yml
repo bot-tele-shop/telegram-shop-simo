@@ -34,8 +34,8 @@ jobs:
       # Migrations that were applied by hand before this workflow existed.
       # If _applied_migrations is empty and BACKFILL_MARKER exists in the
       # database, these are recorded as applied instead of being re-run.
-      BACKFILL_MARKER: "admin_analytics()"
-      BACKFILL_FILES: "0001_init.sql 0002_catalog.sql 0003_durable_payments.sql 0004_admin.sql 0005_admin_analytics.sql"
+      BACKFILL_MARKER: "admin_overview()"
+      BACKFILL_FILES: "0001_init.sql 0002_catalog.sql 0003_durable_payments.sql 0004_admin.sql"
     steps:
       - uses: actions/checkout@v5
 
