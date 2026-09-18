@@ -55,6 +55,39 @@ class CanbosoSettings:
 
 
 @dataclass(frozen=True)
+class WebhookSettings:
+    """Optional. Empty url means long-polling (the default). TLS must terminate
+    at a reverse proxy in front of listen_host:listen_port."""
+
+    url: str = ""
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 8081
+    path: str = "/telegram/webhook"
+    secret: str = field(default="", repr=False)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url)
+
+    def problems(self) -> list[str]:
+        if not self.enabled:
+            return []
+        issues = []
+        if not re.fullmatch(r"https://\S+", self.url):
+            issues.append("webhook.url must be a full https:// URL reachable by Telegram")
+        if not 1 <= len(self.secret) <= 256 or not re.fullmatch(r"[A-Za-z0-9_-]+", self.secret):
+            issues.append(
+                "webhook.secret must be 1-256 characters of A-Z a-z 0-9 _ - "
+                "(Telegram secret_token rules); it authenticates every request"
+            )
+        if not 1 <= self.listen_port <= 65535:
+            issues.append("webhook.listen_port must be 1-65535")
+        if not self.path.startswith("/") or len(self.path) > 128 or ".." in self.path:
+            issues.append("webhook.path must start with / and stay under 128 characters")
+        return issues
+
+
+@dataclass(frozen=True)
 class Settings:
     bot_token: str = field(default="", repr=False)
     admin_ids: frozenset[int] = frozenset()
@@ -68,6 +101,7 @@ class Settings:
     terms_text: str = ""
     privacy_text: str = ""
     canboso: CanbosoSettings = field(default_factory=CanbosoSettings)
+    webhook: WebhookSettings = field(default_factory=WebhookSettings)
 
     @property
     def terms_version(self) -> str:
@@ -101,6 +135,7 @@ class Settings:
         if self.environment == "production" and not self.production_acknowledged:
             issues.append("Production is locked until production_acknowledged is true")
         issues.extend(self.canboso.problems(self.environment))
+        issues.extend(self.webhook.problems())
         return issues
 
     def validate(self, *, require_bot: bool = True) -> None:
@@ -139,6 +174,16 @@ def load_settings(path: Path | None = None) -> Settings:
         budget_currency=supplier.get("budget_currency", ""),
         spend_budget=str(supplier.get("spend_budget", "0")),
     )
+    webhook_raw = raw.get("webhook", {})
+    if not isinstance(webhook_raw, dict):
+        raise ValueError("webhook must be a JSON object")
+    webhook = WebhookSettings(
+        url=os.getenv("WEBHOOK_URL", webhook_raw.get("url", "")),
+        listen_host=webhook_raw.get("listen_host", "127.0.0.1"),
+        listen_port=int(webhook_raw.get("listen_port", 8081)),
+        path=webhook_raw.get("path", "/telegram/webhook"),
+        secret=os.getenv("WEBHOOK_SECRET", webhook_raw.get("secret", "")),
+    )
     db = Path(raw.get("database_path", "data/shop-test.sqlite3"))
     if not db.is_absolute():
         db = path.parent / db
@@ -155,6 +200,7 @@ def load_settings(path: Path | None = None) -> Settings:
         terms_text=raw.get("terms_text", ""),
         privacy_text=raw.get("privacy_text", ""),
         canboso=canboso,
+        webhook=webhook,
     )
 
 

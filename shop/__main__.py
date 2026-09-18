@@ -27,6 +27,7 @@ from .delivery import DeliveryWorker
 from .polling import DurablePolling
 from .store import ShopError, Store
 from .supplier_worker import SupplierWorker
+from .webhook import WebhookServer
 
 
 @contextmanager
@@ -68,12 +69,13 @@ async def run_bot(settings, store: Store) -> None:
     async with Bot(token=settings.bot_token, session=session) as bot:
         me = await bot.get_me()
         store.bind_bot(me.id)
-        webhook = await bot.get_webhook_info()
-        if webhook.url:
-            raise ShopError(
-                "This bot has an active webhook. Disable it deliberately before using "
-                "polling; this program will not remove it or drop pending updates"
-            )
+        if not settings.webhook.enabled:
+            webhook = await bot.get_webhook_info()
+            if webhook.url:
+                raise ShopError(
+                    "This bot has an active webhook. Disable it deliberately before using "
+                    "polling; this program will not remove it or drop pending updates"
+                )
         await bot.set_my_commands(
             [
                 BotCommand(command="shop", description="Browse digital products"),
@@ -106,7 +108,25 @@ async def run_bot(settings, store: Store) -> None:
                     f"Shop running in {settings.environment}; "
                     f"sales {'enabled' if settings.enable_sales else 'paused'}."
                 )
-                await DurablePolling(bot, dispatcher, store).run()
+                sink = DurablePolling(bot, dispatcher, store)
+                if settings.webhook.enabled:
+                    server = WebhookServer(bot, sink, settings.webhook)
+                    await server.start()
+                    try:
+                        # Never dropped, never removed implicitly: pending updates
+                        # stay with Telegram until this process can persist them.
+                        await bot.set_webhook(
+                            url=settings.webhook.url,
+                            secret_token=settings.webhook.secret,
+                            allowed_updates=["message", "callback_query", "pre_checkout_query"],
+                            drop_pending_updates=False,
+                        )
+                        async with asyncio.TaskGroup() as group:
+                            sink.run_consumers(group)
+                    finally:
+                        await server.stop()
+                else:
+                    await sink.run()
             finally:
                 for task in tasks:
                     task.cancel()

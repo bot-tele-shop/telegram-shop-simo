@@ -35,6 +35,20 @@ class DurablePolling:
             kind: asyncio.Queue() for kind in ("checkout", "payment", "ui")
         }
 
+    async def ingest(self, updates: list[Update]) -> None:
+        """Persist before acknowledging; wake consumers only after the write."""
+        batch = [
+            (
+                update.update_id,
+                update_kind(update),
+                update.model_dump_json(exclude_none=True),
+            )
+            for update in updates
+        ]
+        await asyncio.to_thread(self.store.save_updates, batch)
+        for update_id, kind, _ in batch:
+            self.queues[kind].put_nowait(update_id)
+
     async def receive(self) -> None:
         while True:
             offset = await asyncio.to_thread(self.store.polling_offset)
@@ -46,17 +60,7 @@ class DurablePolling:
                     limit=50,
                     allowed_updates=["message", "callback_query", "pre_checkout_query"],
                 )
-                batch = [
-                    (
-                        update.update_id,
-                        update_kind(update),
-                        update.model_dump_json(exclude_none=True),
-                    )
-                    for update in updates
-                ]
-                await asyncio.to_thread(self.store.save_updates, batch)
-                for update_id, kind, _ in batch:
-                    self.queues[kind].put_nowait(update_id)
+                await self.ingest(updates)
             except TelegramRetryAfter as exc:
                 await asyncio.sleep(min(120, max(1, exc.retry_after)))
             except TelegramAPIError as exc:
@@ -90,8 +94,11 @@ class DurablePolling:
             else:
                 await asyncio.to_thread(self.store.finish_update, update_id)
 
+    def run_consumers(self, group: asyncio.TaskGroup) -> None:
+        for kind in ("checkout", "payment", "ui"):
+            group.create_task(self.consume(kind))
+
     async def run(self) -> None:
         async with asyncio.TaskGroup() as group:
             group.create_task(self.receive())
-            for kind in ("checkout", "payment", "ui"):
-                group.create_task(self.consume(kind))
+            self.run_consumers(group)
