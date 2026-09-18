@@ -25,6 +25,7 @@ from .canboso import CanbosoClient, CanbosoError, HttpTransport
 from .config import PROJECT_ROOT, CanbosoSettings, initialize_config, load_settings
 from .delivery import DeliveryWorker
 from .polling import DurablePolling
+from .pricing import Pricer
 from .store import ShopError, Store
 from .supplier_worker import SupplierWorker
 
@@ -95,7 +96,8 @@ async def run_bot(settings, store: Store) -> None:
                 )
                 transport = HttpTransport(supplier_session)
                 client = CanbosoClient(settings.canboso, transport, settings.environment)
-                supplier = SupplierWorker(store, client, worker)
+                supplier = SupplierWorker(store, client, worker,
+                                          pricer=Pricer(store, settings.stars_fx))
                 worker.also_wake.append(supplier.kick)
             tasks = []
             try:
@@ -246,6 +248,25 @@ def main() -> int:
     resolve.add_argument("--operator-id", type=int, required=True, help="Configured Telegram admin ID")
     resolve.add_argument("--confirm", action="store_true", required=True)
     resolve.add_argument("--delivery-file", type=Path, help="Verified UTF-8 delivery for fulfill (max 1 MB)")
+    pricing = sub.add_parser("pricing", help="Manage supplier-linked auto pricing rules")
+    pricing_sub = pricing.add_subparsers(dest="pricing_command", required=True)
+    pricing_sub.add_parser("list", help="Show pricing rules with current prices")
+    pset = pricing_sub.add_parser("set", help="Set a product's pricing rule")
+    pset.add_argument("--sku", required=True)
+    pset.add_argument("--mode", choices=("manual", "auto"), required=True)
+    pset.add_argument("--markup", type=int, default=0, help="Markup over supplier cost, percent")
+    pset.add_argument("--min-profit-stars", type=int, default=0,
+                      help="Always charge at least cost plus this many Stars")
+    pset.add_argument("--max-jump", type=int, default=25,
+                      help="Clamp and flag single-sync price moves beyond this percent")
+    preview = pricing_sub.add_parser(
+        "preview", help="Dry-run repricing against the cached supplier snapshot (no changes)"
+    )
+    preview.add_argument("--max-age", type=int, default=900,
+                         help="Maximum snapshot age in seconds (default 900)")
+    pevents = pricing_sub.add_parser("events", help="Show recent price change events")
+    pevents.add_argument("--sku")
+    pevents.add_argument("--limit", type=int, default=20)
     sub.add_parser("run", help="Connect the configured bot and begin polling")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -355,6 +376,53 @@ def main() -> int:
                 args.order, args.action, evidence, str(args.operator_id), delivery=delivery
             )
             print("Supplier resolution recorded locally. No network requests or refunds were made.")
+        elif args.command == "pricing":
+            pricer = Pricer(store, settings.stars_fx)
+            if args.pricing_command == "list":
+                rules = pricer.list_rules()
+                if not rules:
+                    print("No pricing rules yet. Use: python -m shop pricing set --sku <sku> --mode auto --markup 50")
+                for rule in rules:
+                    print(
+                        f"{rule['sku']}: {rule['mode']} | {rule['price_stars']} Stars | "
+                        f"markup {rule['markup_pct']}% | floor +{rule['min_profit_stars']} | "
+                        f"jump clamp {rule['max_jump_pct']}%"
+                    )
+            elif args.pricing_command == "set":
+                pricer.set_rule(
+                    args.sku, mode=args.mode, markup_pct=args.markup,
+                    min_profit_stars=args.min_profit_stars, max_jump_pct=args.max_jump,
+                )
+                print(f"Pricing rule saved for {args.sku} ({args.mode}).")
+            elif args.pricing_command == "preview":
+                with store.connection() as db:
+                    row = db.execute(
+                        "SELECT * FROM supplier_cache WHERE name='products'"
+                    ).fetchone()
+                if not row or row["key_hash"] != settings.canboso.key_fingerprint:
+                    raise ShopError("No supplier snapshot cached for this buyer key; run supplier-sync first")
+                age = store.clock() - row["fetched_at"]
+                if age > args.max_age:
+                    raise ShopError(
+                        f"Cached supplier snapshot is {int(age)}s old; sync first or pass --max-age"
+                    )
+                snapshot = store.supplier.decrypt(row["ciphertext"])
+                changes = pricer.reprice(snapshot, dry_run=True)
+                if not changes:
+                    print("No price changes would be applied.")
+                for c in changes:
+                    flag = " [FLAGGED: " + c.note + "]" if c.flagged else ""
+                    print(f"{c.sku}: {c.old_price} -> {c.new_price} Stars "
+                          f"(cost {c.old_cost} -> {c.new_cost}){flag}")
+                print("Dry run only; nothing was changed.")
+            elif args.pricing_command == "events":
+                for event in pricer.events(args.sku, args.limit):
+                    flag = " FLAGGED" if event["flagged"] else ""
+                    print(
+                        f"#{event['id']} {event['sku']}: {event['old_price']} -> "
+                        f"{event['new_price']} Stars (cost {event['old_cost']} -> "
+                        f"{event['new_cost']}){flag}"
+                    )
         elif args.command == "run":
             with process_lock(settings.database_path.with_suffix(".process.lock")):
                 asyncio.run(run_bot(settings, store))

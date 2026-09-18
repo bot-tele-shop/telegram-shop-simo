@@ -8,6 +8,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -68,6 +69,9 @@ class Settings:
     terms_text: str = ""
     privacy_text: str = ""
     canboso: CanbosoSettings = field(default_factory=CanbosoSettings)
+    # Stars charged per one unit of supplier currency, e.g. {"USD": Decimal("50")}.
+    # Required before a product in that currency can use auto pricing.
+    stars_fx: dict = field(default_factory=dict)
 
     @property
     def terms_version(self) -> str:
@@ -100,6 +104,16 @@ class Settings:
                 issues.append("Write your real privacy_text (30-3000 characters)")
         if self.environment == "production" and not self.production_acknowledged:
             issues.append("Production is locked until production_acknowledged is true")
+        for currency, rate in self.stars_fx.items():
+            if currency not in {"USD", "VND"}:
+                issues.append(f"stars_fx currency must be USD or VND, not {currency!r}")
+                continue
+            try:
+                value = Decimal(str(rate))
+                if not value.is_finite() or value <= 0:
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError):
+                issues.append(f"stars_fx rate for {currency} must be a positive number")
         issues.extend(self.canboso.problems(self.environment))
         return issues
 
@@ -139,6 +153,18 @@ def load_settings(path: Path | None = None) -> Settings:
         budget_currency=supplier.get("budget_currency", ""),
         spend_budget=str(supplier.get("spend_budget", "0")),
     )
+    stars_fx_raw = raw.get("stars_fx", {})
+    if not isinstance(stars_fx_raw, dict):
+        raise ValueError("stars_fx must be a JSON object like {\"USD\": \"50\"}")
+    stars_fx = {}
+    for currency, rate in stars_fx_raw.items():
+        try:
+            value = Decimal(str(rate))
+            if not value.is_finite() or value <= 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            raise ValueError(f"stars_fx rate for {currency} must be a positive number") from None
+        stars_fx[currency] = value
     db = Path(raw.get("database_path", "data/shop-test.sqlite3"))
     if not db.is_absolute():
         db = path.parent / db
@@ -155,6 +181,7 @@ def load_settings(path: Path | None = None) -> Settings:
         terms_text=raw.get("terms_text", ""),
         privacy_text=raw.get("privacy_text", ""),
         canboso=canboso,
+        stars_fx=stars_fx,
     )
 
 

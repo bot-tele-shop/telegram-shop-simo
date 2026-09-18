@@ -22,6 +22,7 @@ from typing import Callable, Iterator
 from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import ShopError
+from .pricing import PRICING_SCHEMA
 from .supplier_store import SUPPLIER_SCHEMA, SupplierState
 
 
@@ -149,7 +150,7 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.execute("PRAGMA journal_mode=WAL")
-            db.executescript(SCHEMA + SUPPLIER_SCHEMA)
+            db.executescript(SCHEMA + SUPPLIER_SCHEMA + PRICING_SCHEMA)
         with self.transaction() as db:
             meta = {r["key"]: r["value"] for r in db.execute("SELECT * FROM metadata")}
             if meta and meta.get("schema") != "1":
