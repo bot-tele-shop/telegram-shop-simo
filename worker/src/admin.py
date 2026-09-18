@@ -313,6 +313,106 @@ class Admin:
         await self.audit(actor, "order.refund", order_id, {"charge_id": charge_id})
         return {"ok": True, "order_id": order_id, "state": "refunded"}
 
+    async def list_failed_updates(self, actor):
+        """Failed updates for the dashboard. Payloads are never selected here."""
+        return await self.db.select(
+            "update_inbox",
+            {
+                "select": "update_id,kind,attempts,last_error,created_at,updated_at",
+                "state": "eq.failed",
+                "order": "updated_at.desc",
+            },
+            limit=50,
+        )
+
+    async def retry_update(self, actor, data):
+        """Re-arm a failed update and re-run it through the idempotent flow."""
+        update_id = data.get("update_id")
+        if type(update_id) is not int or update_id <= 0:
+            raise AdminError(400, "update_id must be a positive integer")
+        row = await self.db.select_one(
+            "update_inbox",
+            {"select": "update_id,state,payload", "update_id": f"eq.{update_id}"},
+        )
+        if not row:
+            raise AdminError(404, "unknown update")
+        if row.get("state") != "failed":
+            raise AdminError(409, "only failed updates can be retried")
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            raise AdminError(409, "no stored payload; this failure predates payload retention")
+        rearmed = await self.db.rpc("rearm_failed_update", {"p_update_id": update_id})
+        if not rearmed:
+            raise AdminError(409, "update changed state; refresh and try again")
+        import flow
+
+        try:
+            await flow.handle_update(payload, self.env)
+        except Exception:
+            pass  # the outcome is read back from the durable inbox below
+        result = await self.db.select_one(
+            "update_inbox",
+            {
+                "select": "update_id,kind,state,attempts,last_error,updated_at",
+                "update_id": f"eq.{update_id}",
+            },
+        ) or {"update_id": update_id, "state": "unknown"}
+        await self.audit(actor, "update_retry", str(update_id), {"result": result.get("state")})
+        return result
+
+    async def health(self, actor):
+        """Webhook + durability health. Read-only; the bot token stays server-side."""
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            info = await self.tg.call("getWebhookInfo")
+            webhook = {
+                "url": info.get("url") or "",
+                "pending_updates": info.get("pending_update_count", 0),
+                "last_error": info.get("last_error_message"),
+                "last_error_at": info.get("last_error_date"),
+            }
+        except Exception:
+            webhook = None  # Telegram unreachable or token rejected
+        now = datetime.now(timezone.utc)
+        stuck_updates = await self.db.select(
+            "update_inbox",
+            {
+                "select": "update_id,kind,attempts,updated_at",
+                "state": "eq.processing",
+                "updated_at": f"lt.{(now - timedelta(minutes=2)).isoformat()}",
+                "order": "updated_at.asc",
+            },
+            limit=50,
+        )
+        stuck_deliveries = await self.db.select(
+            "orders",
+            {
+                "select": "id,updated_at",
+                "state": "eq.delivering",
+                "updated_at": f"lt.{(now - timedelta(hours=1)).isoformat()}",
+                "order": "updated_at.asc",
+            },
+            limit=50,
+        )
+        return {
+            "db": "ok",
+            "webhook": webhook,
+            "stuck_updates": stuck_updates,
+            "stuck_deliveries": stuck_deliveries,
+        }
+
+    async def list_audit(self, actor):
+        """Latest owner actions. actor emails are already owner-only data."""
+        return await self.db.select(
+            "admin_audit",
+            {
+                "select": "actor,action,target,detail,created_at",
+                "order": "created_at.desc",
+            },
+            limit=100,
+        )
+
     async def get_settings(self, actor):
         rows = await self.db.select("metadata", {"select": "key,value"}, limit=100)
         settings = {row["key"]: row["value"] for row in rows}
@@ -353,6 +453,10 @@ ROUTES = {
     "orders": ("GET", Admin.list_orders),
     "orders/resend": ("POST", Admin.resend_order),
     "orders/refund": ("POST", Admin.refund_order),
+    "updates/failed": ("GET", Admin.list_failed_updates),
+    "updates/retry": ("POST", Admin.retry_update),
+    "health": ("GET", Admin.health),
+    "audit": ("GET", Admin.list_audit),
     "settings": ("GET", Admin.get_settings),
     "settings/update": ("POST", Admin.update_settings),
 }

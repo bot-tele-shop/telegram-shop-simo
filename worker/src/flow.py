@@ -11,6 +11,7 @@ Durability model:
 """
 
 import hashlib
+import json
 import uuid
 
 from db import DB
@@ -675,7 +676,12 @@ async def handle_update(update, env):
 
     # Durable claim BEFORE processing. The update is acknowledged only after
     # it is safely processed or its failure is durably stored for retries.
-    claim = await ctx.db.rpc("claim_update", {"p_update_id": update_id, "p_kind": kind})
+    # The runtime may hand us nested proxy objects; round-trip through JSON so
+    # the stored payload is always plain serializable data.
+    safe_payload = json.loads(json.dumps(update, default=str))
+    claim = await ctx.db.rpc(
+        "claim_update", {"p_update_id": update_id, "p_kind": kind, "p_payload": safe_payload}
+    )
     if claim == "done":
         return
     if claim == "busy":

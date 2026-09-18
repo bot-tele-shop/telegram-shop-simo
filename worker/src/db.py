@@ -1,5 +1,7 @@
 """Supabase PostgREST client. The service role key stays server-side only."""
 
+from urllib.parse import urlencode
+
 from httpclient import request
 
 
@@ -31,7 +33,9 @@ class DB:
     async def select(self, table, params, limit=100):
         params = dict(params)
         params["limit"] = str(limit)
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        # urlencode matters: ISO timestamps contain '+', which a raw query
+        # string decodes as a space and PostgREST rejects with a 400.
+        qs = urlencode(params)
         return await request("GET", f"{self.rest}/{table}?{qs}", headers=self.headers)
 
     async def select_one(self, table, params):
@@ -51,5 +55,5 @@ class DB:
     async def update(self, table, params, row):
         headers = dict(self.headers)
         headers["Prefer"] = "return=minimal"
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        qs = urlencode(params)
         return await request("PATCH", f"{self.rest}/{table}?{qs}", headers=headers, payload=row)
