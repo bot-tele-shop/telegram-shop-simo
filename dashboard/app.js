@@ -262,31 +262,37 @@ async function loadProducts() {
   el.innerHTML = products
     .map((p, i) => {
       const status = p.active
-        ? `<span class="badge ok">live in shop</span>`
-        : `<span class="badge dim">hidden</span>`;
-      const counts =
+        ? `<span class="pc-status live"><i></i>live in shop</span>`
+        : `<span class="pc-status off"><i></i>hidden</span>`;
+      const stats =
         p.source === "stock"
-          ? `<span class="${p.available <= 3 && p.active ? "low" : ""}"><b>${esc(p.available)}</b> available</span>
-             <span><b>${esc(p.sold)}</b> sold</span>
-             <span><b>${esc(p.quarantined)}</b> quarantined</span>`
-          : `<span>supplier-fed</span>`;
+          ? `<div class="pc-stat${p.available <= 3 && p.active ? " low" : ""}"><b>${esc(p.available)}</b><span>available</span></div>
+             <div class="pc-stat"><b>${esc(p.sold)}</b><span>sold</span></div>
+             <div class="pc-stat${p.quarantined > 0 ? " warn" : ""}"><b>${esc(p.quarantined)}</b><span>quarantined</span></div>`
+          : `<div class="pc-stat span3"><span>supplier-fed inventory</span></div>`;
       return `
       <div class="product-card" style="animation-delay:${i * 35}ms">
-        <div class="pc-top">
-          <div>
+        <div class="pc-head">
+          <div class="pc-id">
             <h4>${esc(p.title)}</h4>
-            <code>${esc(p.sku)}</code>
+            <code class="pc-sku">${esc(p.sku)}</code>
           </div>
           <span class="pc-price">★ ${esc(p.price_stars)}</span>
         </div>
         <p class="pc-desc">${esc(p.description || "No description.")}</p>
-        <div class="pc-counts">${counts}<span class="badge info">${esc(p.category)}</span>${status}</div>
-        <div class="pc-actions">
-          <button class="btn small" data-edit="${esc(p.sku)}">Edit</button>
-          ${p.source === "stock" ? `<button class="btn small" data-addstock="${esc(p.sku)}">Add stock</button>` : ""}
-          <button class="btn small ${p.active ? "ghost" : "primary"}" data-toggle="${esc(p.sku)}">
-            ${p.active ? "Hide from shop" : "Activate"}
-          </button>
+        <div class="pc-stats">${stats}</div>
+        <div class="pc-foot">
+          <div class="pc-tags">
+            <span class="pc-cat">${esc(p.category)}</span>
+            ${status}
+          </div>
+          <div class="pc-actions">
+            <button class="btn small" data-edit="${esc(p.sku)}">Edit</button>
+            ${p.source === "stock" ? `<button class="btn small" data-addstock="${esc(p.sku)}">Add stock</button>` : ""}
+            <button class="btn small ${p.active ? "ghost" : "primary"}" data-toggle="${esc(p.sku)}">
+              ${p.active ? "Hide" : "Activate"}
+            </button>
+          </div>
         </div>
       </div>`;
     })
