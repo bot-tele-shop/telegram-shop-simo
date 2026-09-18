@@ -14,6 +14,7 @@ import re
 
 from db import DB
 from fernet import Fernet
+from httpclient import HttpError
 from telegram import Telegram
 
 MAX_BODY_BYTES = 64 * 1024
@@ -92,7 +93,14 @@ class Admin:
         return await self.db.rpc("admin_overview", {})
 
     async def analytics(self, actor):
-        return await self.db.rpc("admin_analytics", {})
+        try:
+            return await self.db.rpc("admin_analytics", {})
+        except HttpError as exc:
+            if exc.status == 404:
+                raise AdminError(
+                    503, "analytics unavailable: apply migration 0005_admin_analytics.sql"
+                ) from None
+            raise
 
     async def list_products(self, actor):
         return await self.db.rpc("admin_products", {})
