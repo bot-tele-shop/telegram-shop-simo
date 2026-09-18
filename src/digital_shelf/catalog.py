@@ -36,6 +36,8 @@ class ProductStatus(StrEnum):
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SKU_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,63}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Multiline text still forbids control characters, but permits tab/LF/CR.
+_MULTILINE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _text(value: object, *, label: str, maximum: int, multiline: bool = True) -> str:
@@ -44,7 +46,7 @@ def _text(value: object, *, label: str, maximum: int, multiline: bool = True) ->
     normalized = value.strip()
     if not normalized or len(normalized) > maximum:
         raise ValueError(f"{label} is empty or too long")
-    if _CONTROL_RE.search(normalized) or (not multiline and "\n" in normalized):
+    if (_MULTILINE_CONTROL_RE if multiline else _CONTROL_RE).search(normalized):
         raise ValueError(f"{label} contains control characters")
     return normalized
 

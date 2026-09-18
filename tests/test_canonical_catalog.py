@@ -68,6 +68,41 @@ def test_category_command_normalizes_slug_and_requires_real_name() -> None:
         CategoryCreateCommand(slug="bad slug", name="")
 
 
+def test_multiline_fields_accept_newlines_but_still_reject_control_characters() -> None:
+    command = ProductCreateCommand(
+        category_id=uuid4(),
+        sku="multiline",
+        title="Multiline",
+        description="first line\nsecond line",
+        price_stars=5,
+        fulfillment_type=FulfillmentType.REUSABLE_CONTENT,
+        inventory_policy=InventoryPolicy.UNLIMITED,
+    )
+    assert "\n" in command.description
+
+    with pytest.raises(ValidationError, match="control characters"):
+        ProductCreateCommand(
+            category_id=uuid4(),
+            sku="control",
+            title="Control",
+            description="bad\x07description",
+            price_stars=5,
+            fulfillment_type=FulfillmentType.REUSABLE_CONTENT,
+            inventory_policy=InventoryPolicy.UNLIMITED,
+        )
+
+    with pytest.raises(ValidationError, match="control characters"):
+        ProductCreateCommand(
+            category_id=uuid4(),
+            sku="newline-title",
+            title="bad\ntitle",
+            description="Description",
+            price_stars=5,
+            fulfillment_type=FulfillmentType.REUSABLE_CONTENT,
+            inventory_policy=InventoryPolicy.UNLIMITED,
+        )
+
+
 def test_product_command_requires_valid_configuration_and_positive_stars_price() -> None:
     command = ProductCreateCommand(
         category_id=uuid4(),
