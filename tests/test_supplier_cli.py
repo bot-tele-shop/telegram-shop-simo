@@ -16,6 +16,7 @@ from test_supplier_store import supplier_shop as supplier_shop
 from shop import __main__ as cli
 from shop.canboso import BALANCE_PATH, PRODUCTS_PATH, CanbosoError, HttpTransport, Reply
 from shop.config import CanbosoSettings, Settings
+from shop.pricing import Pricer
 from shop.store import ShopError, Store
 from shop.supplier_store import SupplierState
 
@@ -602,7 +603,8 @@ def test_run_lifecycle_closes_workers_session_and_dispatcher(
         session_factory.assert_called_once_with(trust_env=False)
         transport_factory.assert_called_once_with(session)
         client_factory.assert_called_once_with(settings.canboso, transport, settings.environment)
-        supplier_factory.assert_called_once_with(store, client, delivery)
+        assert supplier_factory.call_args.args == (store, client, delivery)
+        assert isinstance(supplier_factory.call_args.kwargs["pricer"], Pricer)
         session.__aexit__.assert_awaited_once()
         if outcome == "setup_error":
             polling_factory.assert_not_called()

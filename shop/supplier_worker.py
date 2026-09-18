@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 from .canboso import CanbosoClient, CanbosoError, PurchaseRejected, RateLimited
 from .delivery import DeliveryWorker
@@ -12,10 +13,12 @@ log = logging.getLogger(__name__)
 
 
 class SupplierWorker:
-    def __init__(self, store: Store, client: CanbosoClient, delivery: DeliveryWorker):
+    def __init__(self, store: Store, client: CanbosoClient, delivery: DeliveryWorker,
+                 pricer=None):
         self.store = store
         self.client = client
         self.delivery = delivery
+        self.pricer = pricer
         self.last_sync = float("-inf")
         self.last_review = float("-inf")
         self.reviewed: set[tuple] = set()
@@ -38,7 +41,31 @@ class SupplierWorker:
             log.warning("Supplier synchronization paused (%s)", exc.code)
             return False
         self.last_sync = self.store.clock()
+        await self.reprice(products)
         return True
+
+    async def reprice(self, products: dict) -> None:
+        """Reprice auto-rule products from the fresh snapshot. A repricer
+        failure must never break the sync/purchase loop."""
+        if self.pricer is None:
+            return
+        try:
+            changes = await asyncio.to_thread(self.pricer.reprice, products)
+        except Exception:
+            log.error("Repricer failed (%s)", type(sys.exc_info()[1]).__name__)
+            return
+        for change in changes:
+            if change.flagged:
+                log.warning("Price jump clamped for %s", change.sku)
+        flagged = [c for c in changes if c.flagged]
+        if flagged:
+            lines = "\n".join(
+                f"{c.sku}: {c.old_price} -> {c.new_price} Stars (cost {c.old_cost} -> {c.new_cost})"
+                for c in flagged[:10]
+            )
+            await self.delivery.notify_admins(
+                "Supplier price jump clamped, review recommended:\n" + lines
+            )
 
     async def purchase_one(self) -> bool:
         intent = await asyncio.to_thread(self.store.supplier.claim)

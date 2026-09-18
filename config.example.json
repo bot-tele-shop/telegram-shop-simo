@@ -10,6 +10,9 @@
   "stock_encryption_key": "",
   "terms_text": "",
   "privacy_text": "",
+  "stars_fx": {
+    "USD": "50"
+  },
   "canboso": {
     "enabled": false,
     "api_key": "",
