@@ -64,7 +64,7 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                     .mappings()
                     .all()
                 )
-            assert revision == "0002_identity_settings_features"
+            assert revision == "0003_catalog"
             assert schema == "digital_shelf"
             assert {
                 "users",
@@ -76,6 +76,9 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                 "store_setting_revisions",
                 "feature_flags",
                 "audit_events",
+                "categories",
+                "products",
+                "product_assets",
             } <= table_names
             by_key = {row["feature_key"]: row for row in feature_rows}
             assert by_key["offers"]["state"] == "disabled"
@@ -222,6 +225,60 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
             assert len(recent_audit) == 3
             assert recent_audit[0].action == "setting.update"
             assert "detail" not in recent_audit[0].model_dump()
+
+            category_id = uuid4()
+            product_id = uuid4()
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO digital_shelf.categories (id, slug, name)
+                        VALUES (:id, 'ai-tools', 'AI Tools')
+                        """
+                    ),
+                    {"id": category_id},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO digital_shelf.products
+                            (id, category_id, sku, title, description, price_stars,
+                             fulfillment_type, inventory_policy)
+                        VALUES
+                            (:id, :category_id, 'CHATGPT-PLUS', 'ChatGPT Plus',
+                             'Access', 50, 'unique_code', 'finite_unique')
+                        """
+                    ),
+                    {"id": product_id, "category_id": category_id},
+                )
+
+            with pytest.raises(Exception):
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO digital_shelf.products
+                                (category_id, sku, title, description, price_stars,
+                                 fulfillment_type, inventory_policy)
+                            VALUES
+                                (:category_id, 'INVALID', 'Invalid', 'Invalid', 1,
+                                 'unique_code', 'unlimited')
+                            """
+                        ),
+                        {"category_id": category_id},
+                    )
+
+            async with engine.connect() as connection:
+                active_product_count = await connection.scalar(
+                    text(
+                        """
+                        SELECT count(*) FROM digital_shelf.products
+                        WHERE id = :product_id AND status = 'draft'
+                        """
+                    ),
+                    {"product_id": product_id},
+                )
+            assert active_product_count == 1
         finally:
             await engine.dispose()
 
