@@ -164,6 +164,7 @@ function showView(name, { deferLoad = false } = {}) {
 async function loadView(name) {
   try {
     if (name === "overview") await loadOverview();
+    if (name === "earnings") await loadEarnings();
     if (name === "products") await loadProducts();
     if (name === "stock") await loadStock();
     if (name === "orders") await loadOrders();
@@ -247,6 +248,84 @@ async function loadOverview() {
         )
         .join("")
     : `<div class="empty-state">Stock levels look healthy.</div>`;
+}
+
+/* ---------- earnings ---------- */
+async function loadEarnings() {
+  skeletons($("earnings-cards"), 4, 84);
+  $("earnings-error").hidden = true;
+  let a;
+  try {
+    a = await api("analytics");
+  } catch (err) {
+    $("earnings-cards").innerHTML = "";
+    $("earnings-chart").innerHTML = "";
+    $("earnings-products").innerHTML = "";
+    const banner = $("earnings-error");
+    banner.textContent = /admin_analytics|404|not found|function/i.test(err.message)
+      ? "Analytics need one extra database function. Run supabase/migrations/0005_admin_analytics.sql in your Supabase SQL editor, then refresh."
+      : err.message;
+    banner.hidden = false;
+    return;
+  }
+
+  const r = a.revenue;
+  const kept = r.kept_stars + r.pending_refund_stars;
+  const lifetime = kept + r.refunded_stars;
+  const avg = r.payments_count ? Math.round(lifetime / r.payments_count) : 0;
+  const cards = [
+    { label: "kept after refunds", value: `★ ${kept}`, accent: true },
+    { label: "lifetime earned", value: `★ ${lifetime}` },
+    { label: "refunded", value: `★ ${r.refunded_stars}`, alert: r.refunded_stars > 0 },
+    { label: "payments", value: r.payments_count },
+    { label: "avg payment", value: `★ ${avg}` },
+  ];
+  if (r.review_stars > 0)
+    cards.push({ label: "flagged for review", value: `★ ${r.review_stars}`, alert: true });
+  $("earnings-cards").innerHTML = cards
+    .map(
+      (c, i) => `
+    <div class="stat-card${c.accent ? " accent" : ""}${c.alert ? " alert" : ""}" style="animation-delay:${i * 40}ms">
+      <span class="stat-value">${esc(c.value)}</span>
+      <span class="stat-label">${esc(c.label)}</span>
+    </div>`,
+    )
+    .join("");
+
+  const days = a.by_day || [];
+  const max = Math.max(1, ...days.map((d) => d.earned_stars));
+  $("earnings-chart").innerHTML = days.length
+    ? `<div class="bars">${days
+        .map((d) => {
+          const h = Math.max(2, Math.round((d.earned_stars / max) * 100));
+          const label = new Date(d.day).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+          return `<div class="bar" title="${label}: ★ ${d.earned_stars}${d.refunded_stars ? ` (−${d.refunded_stars} refunded)` : ""}">
+            <em>★ ${d.earned_stars || ""}</em>
+            <i style="height:${h}%"></i>
+            <span>${label}</span>
+          </div>`;
+        })
+        .join("")}</div>`
+    : `<div class="empty-state">No payments in the last 14 days.</div>`;
+
+  const rows = a.by_product || [];
+  $("earnings-products").innerHTML = rows.length
+    ? `
+    <table class="stock-table">
+      <thead><tr><th>product</th><th>sales</th><th>earned</th><th>refunds</th><th>refunded</th></tr></thead>
+      <tbody>${rows
+        .map(
+          (p) => `<tr>
+            <td>${esc(p.title)} <span class="mono faint">${esc(p.sku)}</span></td>
+            <td class="mono">${esc(p.sales)}</td>
+            <td class="mono gold">★ ${esc(p.earned_stars)}</td>
+            <td class="mono">${esc(p.refunds)}</td>
+            <td class="mono${p.refunded_stars ? " red" : ""}">${p.refunded_stars ? `−★ ${esc(p.refunded_stars)}` : "—"}</td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table>`
+    : `<div class="empty-state">No sales yet — paid orders show up here.</div>`;
 }
 
 /* ---------- products ---------- */
@@ -490,6 +569,7 @@ for (const b of document.querySelectorAll("#nav button[data-view]"))
   b.addEventListener("click", () => showView(b.dataset.view));
 
 $("overview-refresh").addEventListener("click", () => loadView("overview"));
+$("earnings-refresh").addEventListener("click", () => loadView("earnings"));
 document.querySelector("#view-overview").addEventListener("click", (e) => {
   const goto = e.target.closest("[data-goto]");
   if (goto) showView(goto.dataset.goto);

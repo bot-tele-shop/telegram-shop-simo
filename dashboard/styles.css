@@ -429,6 +429,48 @@ main { flex: 1; padding: 34px 40px 80px; max-width: 1180px; }
 .pc-status.off i { background: var(--faint); }
 .pc-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 
+/* ---------- earnings ---------- */
+.bars {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  height: 170px;
+  padding-top: 8px;
+}
+.bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.bar em {
+  font: 500 10px var(--font-mono);
+  font-style: normal;
+  color: var(--gold);
+  white-space: nowrap;
+}
+.bar i {
+  display: block;
+  width: 100%;
+  max-width: 38px;
+  min-height: 2px;
+  border-radius: 5px 5px 2px 2px;
+  background: linear-gradient(180deg, var(--gold), var(--gold-deep));
+  transition: filter 0.15s ease;
+}
+.bar:hover i { filter: brightness(1.2); }
+.bar span {
+  font: 10px var(--font-mono);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.mono.gold { color: var(--gold); }
+.mono.red { color: var(--red); }
+.faint { color: var(--faint); }
+
 /* ---------- stock ---------- */
 .dropzone {
   display: flex;

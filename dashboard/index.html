@@ -47,6 +47,7 @@
     </div>
     <nav id="nav">
       <button data-view="overview" class="active"><span class="nav-ico">◈</span>Overview</button>
+<button data-view="earnings"><span class="nav-ico">★</span>Earnings</button>
       <button data-view="products"><span class="nav-ico">▣</span>Products</button>
       <button data-view="stock"><span class="nav-ico">✦</span>Stock</button>
       <button data-view="orders"><span class="nav-ico">↔</span>Orders</button>
@@ -80,7 +81,29 @@
       </div>
     </section>
 
-    <!-- ======== PRODUCTS ======== -->
+    <!-- ======== EARNINGS ======== -->
+<section id="view-earnings" hidden>
+<header class="page-head">
+<div>
+<p class="eyebrow">Revenue</p>
+<h2 class="display">Earnings</h2>
+</div>
+<button class="btn ghost" id="earnings-refresh">Refresh</button>
+</header>
+<p class="hint">All amounts in Telegram Stars. “Kept” is what stays with you after refunds.</p>
+<div id="earnings-error" class="banner" hidden></div>
+<div id="earnings-cards" class="stats-grid"></div>
+<div class="panel">
+<h3>Last 14 days</h3>
+<div id="earnings-chart"></div>
+</div>
+<div class="panel">
+<h3>By product</h3>
+<div id="earnings-products"></div>
+</div>
+</section>
+
+<!-- ======== PRODUCTS ======== -->
     <section id="view-products" hidden>
       <header class="page-head">
         <div>
