@@ -356,7 +356,7 @@ class Admin:
                 "select": "update_id,kind,state,attempts,last_error,updated_at",
                 "update_id": f"eq.{update_id}",
             },
-        )
+        ) or {"update_id": update_id, "state": "unknown"}
         await self.audit(actor, "update_retry", str(update_id), {"result": result.get("state")})
         return result
 

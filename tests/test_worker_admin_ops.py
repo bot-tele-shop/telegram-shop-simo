@@ -131,3 +131,28 @@ def test_audit_list_is_bounded(adm):
     run(adm.list_audit("owner@example.com"))
     assert adm.db.select.call_args.args[0] == "admin_audit"
     assert adm.db.select.call_args.kwargs["limit"] == 100
+
+
+def test_select_urlencodes_timestamps(admin_module):
+    """Regression: raw '+' in ISO timestamps decodes as a space -> PostgREST 400."""
+    import importlib.util as ilu
+
+    root = Path(__file__).resolve().parents[1] / "worker/src"
+    spec = ilu.spec_from_file_location("db_real", root / "db.py")
+    db_mod = ilu.module_from_spec(spec)
+    sys.modules["db_real"] = db_mod
+    spec.loader.exec_module(db_mod)
+
+    calls = []
+
+    async def fake_request(method, url, headers=None, payload=None):
+        calls.append(url)
+        return []
+
+    db_mod.request = fake_request
+    db = db_mod.DB("https://example.invalid", "key")
+    import asyncio
+
+    asyncio.run(db.select("t", {"updated_at": "lt.2026-09-18T14:00:00+00:00"}))
+    assert "+" not in calls[0].split("?", 1)[1]
+    assert "%2B" in calls[0] or "%2b" in calls[0]
