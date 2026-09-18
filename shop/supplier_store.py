@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from .canboso import CanbosoError, PurchaseResult, money, valid_email
 from .config import CanbosoSettings
 from .errors import ShopError
+from .providers import registered
 
 if TYPE_CHECKING:
     from .store import Store
@@ -66,8 +67,8 @@ class SupplierState:
         return json.loads(self.store.cipher.decrypt(ciphertext.encode()))
 
     def set_mapping(self, db: sqlite3.Connection, sku: str, specification: dict) -> None:
-        if not isinstance(specification, dict) or specification.get("provider") != "canboso":
-            raise ShopError("Supplier specification requires provider=canboso")
+        if not isinstance(specification, dict) or not registered(specification.get("provider", "")):
+            raise ShopError("Supplier specification requires a registered provider")
         product_id = specification.get("product_id")
         product_type = specification.get("product_type")
         if not isinstance(product_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", product_id):
@@ -87,8 +88,8 @@ class SupplierState:
                 raise ShopError("Business slots need a fixed slot_months variant: 1, 3, 6 or 12")
         elif months is not None:
             raise ShopError("Do not send slot_months for catalog slots or account products")
-        clean = {"provider": "canboso", "product_id": product_id, "product_type": product_type,
-                 "currency": currency, "max_cost": str(ceiling)}
+        clean = {"provider": specification["provider"], "product_id": product_id,
+                 "product_type": product_type, "currency": currency, "max_cost": str(ceiling)}
         if months is not None:
             clean["slot_months"] = months
         db.execute("INSERT INTO supplier_mappings VALUES (?,?) ON CONFLICT(sku) DO UPDATE SET "

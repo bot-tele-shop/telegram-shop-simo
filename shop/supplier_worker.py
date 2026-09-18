@@ -14,11 +14,12 @@ log = logging.getLogger(__name__)
 
 class SupplierWorker:
     def __init__(self, store: Store, client: CanbosoClient, delivery: DeliveryWorker,
-                 pricer=None):
+                 pricer=None, router=None):
         self.store = store
         self.client = client
         self.delivery = delivery
         self.pricer = pricer
+        self.router = router
         self.last_sync = float("-inf")
         self.last_review = float("-inf")
         self.reviewed: set[tuple] = set()
@@ -41,12 +42,32 @@ class SupplierWorker:
             log.warning("Supplier synchronization paused (%s)", exc.code)
             return False
         self.last_sync = self.store.clock()
-        await self.reprice(products)
+        await self.route_and_reprice(products)
         return True
 
-    async def reprice(self, products: dict) -> None:
-        """Reprice auto-rule products from the fresh snapshot. A repricer
-        failure must never break the sync/purchase loop."""
+    async def route_and_reprice(self, products: dict) -> None:
+        """Pick the cheapest in-stock supplier per SKU, then reprice from the
+        winner's cost. A failure here must never break the sync/purchase loop."""
+        snapshots = {"canboso": products}
+        if self.router is not None:
+            try:
+                decisions = await asyncio.to_thread(self.router.route, snapshots)
+            except Exception:
+                log.error("Router failed (%s)", type(sys.exc_info()[1]).__name__)
+            else:
+                switched = [d for d in decisions if d.changed]
+                if switched:
+                    lines = "\n".join(f"{d.sku} -> {d.winner} (cost {d.cost})"
+                                      for d in switched[:10])
+                    await self.delivery.notify_admins(
+                        "Supplier routing switched:\n" + lines
+                    )
+                unavailable = [d for d in decisions if d.winner is None]
+                if unavailable:
+                    lines = "\n".join(f"{d.sku}: {d.reason}" for d in unavailable[:10])
+                    await self.delivery.notify_admins(
+                        "No supplier candidate currently sellable:\n" + lines
+                    )
         if self.pricer is None:
             return
         try:
