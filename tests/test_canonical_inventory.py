@@ -96,3 +96,35 @@ def test_inventory_state_transition_rejects_reactivation_or_skips(
 ) -> None:
     with pytest.raises(InvalidInventoryTransition):
         transition_inventory_state(current, requested)
+
+
+def test_reserve_one_rejects_naive_or_past_expiry() -> None:
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from digital_shelf.inventory_admin import DatabaseInventoryAllocator
+
+    allocator = DatabaseInventoryAllocator(engine=object())  # type: ignore[arg-type]
+
+    naive = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        asyncio.run(
+            allocator.reserve_one(
+                product_id=uuid4(),
+                order_item_id=uuid4(),
+                reserved_until=naive,
+                correlation_id=uuid4(),
+            )
+        )
+
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    with pytest.raises(ValueError, match="future"):
+        asyncio.run(
+            allocator.reserve_one(
+                product_id=uuid4(),
+                order_item_id=uuid4(),
+                reserved_until=past,
+                correlation_id=uuid4(),
+            )
+        )

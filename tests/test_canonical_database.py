@@ -94,12 +94,8 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
             } <= table_names
             by_key = {row["feature_key"]: row for row in feature_rows}
             assert by_key["offers"]["state"] == "disabled"
-            assert dict(by_key["low_stock_alerts"]) == {
-                "feature_key": "low_stock_alerts",
-                "requested_enabled": True,
-                "state": "setup_required",
-                "revision": 1,
-            }
+            # Seeded as requested-but-incomplete; later runs may have enabled it.
+            assert by_key["low_stock_alerts"]["requested_enabled"] is True
 
             subject = uuid4()
             async with engine.begin() as connection:
@@ -129,18 +125,29 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
             assert principal.admin_id == admin_id
             assert principal.allows("features.manage")
 
+            async with engine.connect() as connection:
+                current_feature_revision = int(
+                    await connection.scalar(
+                        text(
+                            """
+                            SELECT revision FROM digital_shelf.feature_flags
+                            WHERE feature_key = 'low_stock_alerts'
+                            """
+                        )
+                    )
+                )
             updated = await DatabaseFeatureStore(engine).update_feature(
                 feature=FeatureKey.LOW_STOCK_ALERTS,
                 command=FeatureUpdateCommand(
                     requested_enabled=True,
                     config={"owner_destination": "123", "threshold": 3},
-                    expected_revision=1,
+                    expected_revision=current_feature_revision,
                 ),
                 actor_admin_id=principal.admin_id,
                 correlation_id=uuid4(),
             )
             assert updated.state is FeatureState.ENABLED
-            assert updated.revision == 2
+            assert updated.revision == current_feature_revision + 1
 
             async with engine.connect() as connection:
                 persisted_state = await connection.scalar(
@@ -165,18 +172,32 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
             assert audit_count == 1
 
             setting_store = DatabaseSettingStore(engine)
+            async with engine.connect() as connection:
+                revision_rows = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT key, revision FROM digital_shelf.store_settings
+                            WHERE key IN ('checkout_paused', 'shop_name')
+                            """
+                        )
+                    )
+                ).all()
+            setting_revisions = {str(key): int(rev) for key, rev in revision_rows}
+            checkout_revision = setting_revisions.get("checkout_paused", 0)
+            shop_name_revision = setting_revisions.get("shop_name", 0)
             updated_settings = await setting_store.update_settings(
                 command=SettingsPatchCommand(
                     updates=[
                         SettingUpdate(
                             key="checkout_paused",
                             value=True,
-                            expected_revision=0,
+                            expected_revision=checkout_revision,
                         ),
                         SettingUpdate(
                             key="shop_name",
                             value="Digital Shelf",
-                            expected_revision=0,
+                            expected_revision=shop_name_revision,
                         ),
                     ]
                 ),
@@ -184,8 +205,8 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                 correlation_id=uuid4(),
             )
             assert [(item.key.value, item.revision) for item in updated_settings] == [
-                ("checkout_paused", 1),
-                ("shop_name", 1),
+                ("checkout_paused", checkout_revision + 1),
+                ("shop_name", shop_name_revision + 1),
             ]
 
             with pytest.raises(SettingRevisionConflictError):
@@ -230,25 +251,32 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                     {"admin_id": principal.admin_id},
                 )
             assert checkout_row["value"] is True
-            assert checkout_row["revision"] == 1
+            assert checkout_row["revision"] == checkout_revision + 1
             assert setting_audit_count == 2
 
             recent_audit = await DatabaseAuditStore(engine).list_events(limit=10)
-            assert len(recent_audit) == 3
-            assert recent_audit[0].action == "setting.update"
-            assert "detail" not in recent_audit[0].model_dump()
+            own_events = [event for event in recent_audit if event.actor_admin_id == admin_id]
+            assert [event.action for event in own_events] == [
+                "setting.update",
+                "setting.update",
+                "feature.update",
+            ]
+            assert "detail" not in own_events[0].model_dump()
 
             category_id = uuid4()
             product_id = uuid4()
+            run_suffix = uuid4().hex[:8]
+            category_slug = f"ai-tools-{run_suffix}"
+            product_sku = f"CHATGPT-{run_suffix}".upper()
             async with engine.begin() as connection:
                 await connection.execute(
                     text(
                         """
                         INSERT INTO digital_shelf.categories (id, slug, name)
-                        VALUES (:id, 'ai-tools', 'AI Tools')
+                        VALUES (:id, :slug, 'AI Tools')
                         """
                     ),
-                    {"id": category_id},
+                    {"id": category_id, "slug": category_slug},
                 )
                 await connection.execute(
                     text(
@@ -257,11 +285,11 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                             (id, category_id, sku, title, description, price_stars,
                              fulfillment_type, inventory_policy)
                         VALUES
-                            (:id, :category_id, 'CHATGPT-PLUS', 'ChatGPT Plus',
+                            (:id, :category_id, :sku, 'ChatGPT Plus',
                              'Access', 50, 'unique_code', 'finite_unique')
                         """
                     ),
-                    {"id": product_id, "category_id": category_id},
+                    {"id": product_id, "category_id": category_id, "sku": product_sku},
                 )
 
             with pytest.raises(Exception):
@@ -293,15 +321,17 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
             assert active_product_count == 1
 
             catalog_store = DatabaseCatalogStore(engine)
+            baseline_categories = len(await catalog_store.list_categories())
+            baseline_products = len(await catalog_store.list_products())
             managed_category = await catalog_store.create_category(
-                command=CategoryCreateCommand(slug="managed", name="Managed"),
+                command=CategoryCreateCommand(slug=f"managed-{run_suffix}", name="Managed"),
                 actor_admin_id=principal.admin_id,
                 correlation_id=uuid4(),
             )
             managed_product = await catalog_store.create_product(
                 command=ProductCreateCommand(
                     category_id=managed_category.id,
-                    sku="notion-template",
+                    sku=f"notion-{run_suffix}",
                     title="Notion Template",
                     description="Reusable template",
                     price_stars=10,
@@ -311,9 +341,9 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                 actor_admin_id=principal.admin_id,
                 correlation_id=uuid4(),
             )
-            assert managed_product.sku == "NOTION-TEMPLATE"
-            assert len(await catalog_store.list_categories()) == 2
-            assert len(await catalog_store.list_products()) == 2
+            assert managed_product.sku == f"NOTION-{run_suffix}".upper()
+            assert len(await catalog_store.list_categories()) == baseline_categories + 1
+            assert len(await catalog_store.list_products()) == baseline_products + 1
 
             async with engine.connect() as connection:
                 catalog_audit_count = await connection.scalar(

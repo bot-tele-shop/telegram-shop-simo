@@ -3,7 +3,7 @@
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -302,6 +302,10 @@ class DatabaseInventoryAllocator:
         reserved_until: datetime,
         correlation_id: UUID,
     ) -> InventoryReservation:
+        if reserved_until.tzinfo is None:
+            raise ValueError("reserved_until must be timezone-aware")
+        if reserved_until <= datetime.now(UTC):
+            raise ValueError("reserved_until must be in the future")
         async with self._engine.begin() as connection:
             policy = await connection.scalar(
                 text("SELECT inventory_policy FROM digital_shelf.products WHERE id = :id"),
