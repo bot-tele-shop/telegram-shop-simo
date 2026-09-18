@@ -19,7 +19,8 @@ from digital_shelf.catalog import CategoryCreateCommand, ProductCreateCommand
 from digital_shelf.catalog_admin import DatabaseCatalogStore
 from digital_shelf.db import create_engine, database_ready
 from digital_shelf.features import FeatureKey, FeatureState
-from digital_shelf.inventory import InventoryCipher, InventoryImporter
+from digital_shelf.inventory import InventoryCipher
+from digital_shelf.inventory_admin import DatabaseInventoryStore
 from digital_shelf.store_settings import (
     DatabaseSettingStore,
     SettingRevisionConflictError,
@@ -325,34 +326,21 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
             inventory_cipher = InventoryCipher(
                 key=Fernet.generate_key().decode(), key_version="v1"
             )
-            prepared = InventoryImporter(inventory_cipher).prepare(["LICENSE-001"], set())
-            record = prepared.records[0]
-            async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO digital_shelf.inventory_items
-                            (product_id, fingerprint, ciphertext, encryption_key_version)
-                        VALUES (:product_id, :fingerprint, :ciphertext, :key_version)
-                        """
-                    ),
-                    {
-                        "product_id": product_id,
-                        "fingerprint": record.fingerprint,
-                        "ciphertext": record.ciphertext.encode(),
-                        "key_version": record.key_version,
-                    },
-                )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO digital_shelf.inventory_counters
-                            (product_id, available_quantity)
-                        VALUES (:product_id, 1)
-                        """
-                    ),
-                    {"product_id": product_id},
-                )
+            inventory_store = DatabaseInventoryStore(engine, inventory_cipher)
+            import_result = await inventory_store.commit(
+                product_id=product_id,
+                lines=["LICENSE-001"],
+                actor_admin_id=principal.admin_id,
+                correlation_id=uuid4(),
+            )
+            assert import_result.added_count == 1
+            duplicate_result = await inventory_store.commit(
+                product_id=product_id,
+                lines=["LICENSE-001"],
+                actor_admin_id=principal.admin_id,
+                correlation_id=uuid4(),
+            )
+            assert duplicate_result.duplicate_count == 1
             async with engine.connect() as connection:
                 inventory_count = await connection.scalar(
                     text(

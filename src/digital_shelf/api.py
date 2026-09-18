@@ -41,6 +41,16 @@ from digital_shelf.catalog_admin import (
 from digital_shelf.config import Settings, get_settings
 from digital_shelf.db import create_engine, database_ready
 from digital_shelf.features import FeatureKey
+from digital_shelf.inventory import InventoryCipher, InventoryImportPreview
+from digital_shelf.inventory_admin import (
+    DatabaseInventoryStore,
+    InventoryCommitCommand,
+    InventoryImportCommand,
+    InventoryImportResult,
+    InventoryPolicyError,
+    InventoryStore,
+)
+from digital_shelf.inventory_admin import ProductNotFoundError as InventoryProductNotFoundError
 from digital_shelf.logging import configure_logging
 from digital_shelf.store_settings import (
     DatabaseSettingStore,
@@ -62,6 +72,7 @@ def create_app(
     setting_store: SettingStore | None = None,
     audit_store: AuditStore | None = None,
     catalog_store: CatalogStore | None = None,
+    inventory_store: InventoryStore | None = None,
 ) -> FastAPI:
     runtime_settings = settings or get_settings()
 
@@ -81,6 +92,15 @@ def create_app(
         app.state.setting_store = setting_store or DatabaseSettingStore(app.state.engine)
         app.state.audit_store = audit_store or DatabaseAuditStore(app.state.engine)
         app.state.catalog_store = catalog_store or DatabaseCatalogStore(app.state.engine)
+        app.state.inventory_store = inventory_store
+        if app.state.inventory_store is None and runtime_settings.inventory_encryption_key:
+            app.state.inventory_store = DatabaseInventoryStore(
+                app.state.engine,
+                InventoryCipher(
+                    key=runtime_settings.inventory_encryption_key.get_secret_value(),
+                    key_version=runtime_settings.inventory_key_version,
+                ),
+            )
         yield
         await app.state.engine.dispose()
 
@@ -290,6 +310,67 @@ def create_app(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "category not found") from exc
         except ProductConflictError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, "product SKU already exists") from exc
+
+    @application.post(
+        "/admin/v1/products/{product_id}/inventory/preview",
+        response_model=InventoryImportPreview,
+        tags=["admin"],
+    )
+    async def preview_inventory(
+        product_id: UUID,
+        command: InventoryImportCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> InventoryImportPreview:
+        require_permission(admin, "inventory.manage")
+        store: InventoryStore | None = request.app.state.inventory_store
+        if store is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "inventory service unavailable",
+            )
+        try:
+            return await store.preview(product_id=product_id, lines=command.lines)
+        except InventoryProductNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "product not found") from exc
+        except InventoryPolicyError as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "product does not use unique inventory",
+            ) from exc
+
+    @application.post(
+        "/admin/v1/products/{product_id}/inventory/commit",
+        response_model=InventoryImportResult,
+        tags=["admin"],
+    )
+    async def commit_inventory(
+        product_id: UUID,
+        command: InventoryCommitCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> InventoryImportResult:
+        require_permission(admin, "inventory.manage")
+        store: InventoryStore | None = request.app.state.inventory_store
+        if store is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "inventory service unavailable",
+            )
+        try:
+            return await store.commit(
+                product_id=product_id,
+                lines=command.lines,
+                actor_admin_id=admin.admin_id,
+                correlation_id=request.state.correlation_id,
+            )
+        except InventoryProductNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "product not found") from exc
+        except InventoryPolicyError as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "product does not use unique inventory",
+            ) from exc
 
     return application
 

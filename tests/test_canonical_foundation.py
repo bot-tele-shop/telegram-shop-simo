@@ -2,6 +2,7 @@ import json
 import logging
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -17,6 +18,7 @@ def production_settings(**overrides: object) -> dict[str, object]:
         "webhook_path_secret": "p" * 32,
         "webhook_header_secret": "h" * 32,
         "supabase_auth_issuer": "https://project.supabase.co/auth/v1",
+        "inventory_encryption_key": Fernet.generate_key().decode(),
     }
     values.update(overrides)
     return values
@@ -56,6 +58,13 @@ def test_jwks_url_is_derived_from_validated_issuer() -> None:
     assert settings.supabase_jwks_url == (
         "https://project.supabase.co/auth/v1/.well-known/jwks.json"
     )
+
+
+def test_production_requires_valid_inventory_encryption_key() -> None:
+    for key in (None, "not-a-fernet-key"):
+        values = production_settings(inventory_encryption_key=key)
+        with pytest.raises(ValidationError, match="inventory_encryption_key"):
+            Settings(**values)
 
 
 def test_settings_repr_does_not_expose_secrets() -> None:

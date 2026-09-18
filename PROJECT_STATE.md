@@ -14,7 +14,7 @@ Implemented and locally verified so far:
 - structured secret-redacting logs
 - async SQLAlchemy/asyncpg database readiness
 - Alembic bootstrap migration against PostgreSQL
-- 861 legacy-plus-canonical tests passed locally (1 external database test skipped)
+- 867 legacy-plus-canonical tests passed locally (1 external database test skipped)
 - lint, strict type checking and dashboard JavaScript syntax
 - canonical container built successfully in GitHub CI on `main`
 - earlier merged `main` branch CI execution passed on GitHub Actions; the current feature branch has not run CI
@@ -35,7 +35,7 @@ Release 1 is **not gated complete**. Docker/PostgreSQL is unavailable locally, s
 
 Release 2 catalog work has begun locally. The catalog policy/schema and category/product create/list API are implemented and covered by local tests, but Release 2 remains gated until the real PostgreSQL catalog/inventory invariants run in CI.
 
-Inventory encryption and import validation are implemented locally. The two-stage admin inventory API and real concurrent allocation behavior are still pending; no inventory data has been migrated or exposed in production.
+Inventory encryption, import validation, and the two-stage admin preview/commit API are implemented locally. Real concurrent allocation behavior and the PostgreSQL integration gate are still pending; no inventory data has been migrated or exposed in production.
 
 Current production UI work:
 
