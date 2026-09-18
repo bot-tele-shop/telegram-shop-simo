@@ -91,6 +91,9 @@ class Admin:
     async def overview(self, actor):
         return await self.db.rpc("admin_overview", {})
 
+    async def analytics(self, actor):
+        return await self.db.rpc("admin_analytics", {})
+
     async def list_products(self, actor):
         return await self.db.rpc("admin_products", {})
 
@@ -333,6 +336,7 @@ class Admin:
 
 ROUTES = {
     "overview": ("GET", Admin.overview),
+    "analytics": ("GET", Admin.analytics),
     "products": ("GET", Admin.list_products),
     "products/create": ("POST", Admin.create_product),
     "products/update": ("POST", Admin.update_product),
