@@ -14,7 +14,6 @@ import re
 
 from db import DB
 from fernet import Fernet
-from httpclient import HttpError
 from telegram import Telegram
 
 MAX_BODY_BYTES = 64 * 1024
@@ -95,8 +94,9 @@ class Admin:
     async def analytics(self, actor):
         try:
             return await self.db.rpc("admin_analytics", {})
-        except HttpError as exc:
-            if exc.status == 404:
+        except Exception as exc:
+            # httpclient.HttpError without the import: tests stub the module.
+            if getattr(exc, "status", None) == 404:
                 raise AdminError(
                     503, "analytics unavailable: apply migration 0005_admin_analytics.sql"
                 ) from None
