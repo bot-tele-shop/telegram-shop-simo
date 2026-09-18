@@ -19,6 +19,12 @@ class SupplierWorker:
         self.last_sync = float("-inf")
         self.last_review = float("-inf")
         self.reviewed: set[tuple] = set()
+        # Set by kick() when a supplier payment lands; the 5s sweep remains as
+        # the retry/recovery safety net.
+        self.wake = asyncio.Event()
+
+    def kick(self) -> None:
+        self.wake.set()
 
     async def synchronize(self) -> bool:
         if self.store.supplier.cooldown_until() > self.store.clock():
@@ -90,4 +96,8 @@ class SupplierWorker:
                 await self.tick()
             except Exception as exc:
                 log.error("Supplier worker paused (%s)", type(exc).__name__)
-            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(self.wake.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            self.wake.clear()

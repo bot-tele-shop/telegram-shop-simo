@@ -535,8 +535,8 @@ def test_run_lifecycle_closes_workers_session_and_dispatcher(
         finally:
             events.append(name + " stopped")
 
-    delivery = SimpleNamespace(run=lambda: worker_run("delivery"))
-    supplier = SimpleNamespace(run=lambda: worker_run("supplier"))
+    delivery = SimpleNamespace(run=lambda: worker_run("delivery"), also_wake=[])
+    supplier = SimpleNamespace(run=lambda: worker_run("supplier"), kick=lambda: None)
     delivery_factory = Mock(return_value=delivery)
     supplier_factory = Mock(return_value=supplier)
     monkeypatch.setattr(cli, "DeliveryWorker", delivery_factory)

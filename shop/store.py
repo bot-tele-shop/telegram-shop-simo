@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -110,20 +111,28 @@ class Store:
         self.cipher = Fernet(encryption_key.encode())
         self.fingerprint_key = hashlib.sha256(encryption_key.encode()).digest()
         self.supplier = SupplierState(self)
+        # One persistent connection per worker thread; opening a connection and
+        # re-applying pragmas on every query dominated per-message latency.
+        self._local = threading.local()
+        self._offset_lock = threading.Lock()
+        self._offset_cache: int | None = None
+        self._offset_cached = False
         if environment not in {"test", "production"}:
             raise ShopError("Unknown database environment")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(self.path, timeout=1.5, isolation_level=None)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
-        db.execute("PRAGMA busy_timeout=1500")
-        db.execute("PRAGMA synchronous=FULL")
-        try:
-            yield db
-        finally:
-            db.close()
+        db = getattr(self._local, "db", None)
+        if db is None:
+            db = sqlite3.connect(self.path, timeout=1.5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("PRAGMA busy_timeout=1500")
+            # WAL (set once in initialize) makes NORMAL crash-safe; FULL only adds
+            # protection against OS/power failure and costs an fsync per commit.
+            db.execute("PRAGMA synchronous=NORMAL")
+            self._local.db = db
+        yield db
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -737,9 +746,18 @@ class Store:
             db.execute("INSERT OR IGNORE INTO metadata VALUES ('bot_id',?)", (str(bot_id),))
 
     def polling_offset(self) -> int | None:
+        # The single-process lock means only save_updates can advance the offset,
+        # so an in-memory cache stays authoritative after the first read.
+        with self._offset_lock:
+            if self._offset_cached:
+                return self._offset_cache
         with self.connection() as db:
             row = db.execute("SELECT value FROM metadata WHERE key='polling_offset'").fetchone()
-            return int(row[0]) if row else None
+            value = int(row[0]) if row else None
+        with self._offset_lock:
+            self._offset_cache = value
+            self._offset_cached = True
+        return value
 
     def save_updates(self, updates: list[tuple[int, str, str]]) -> None:
         if not updates:
@@ -758,6 +776,9 @@ class Store:
                 "DO UPDATE SET value=excluded.value",
                 (str(updates[-1][0] + 1),),
             )
+        with self._offset_lock:
+            self._offset_cache = updates[-1][0] + 1
+            self._offset_cached = True
 
     def claim_update(self, kind: str) -> tuple[int, str] | None:
         with self.transaction() as db:
