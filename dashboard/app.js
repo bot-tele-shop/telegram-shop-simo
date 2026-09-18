@@ -142,17 +142,23 @@ const ORDER_BADGE = {
   refund_pending: "bad",
 };
 
+const STOCK_BADGE = { available: "ok", reserved: "info", sold: "dim", quarantined: "bad" };
+
+function stockBadge(state) {
+  return `<span class="badge ${STOCK_BADGE[state] || "dim"}">${esc(state)}</span>`;
+}
+
 function orderBadge(state) {
   return `<span class="badge ${ORDER_BADGE[state] || "dim"}">${esc(state.replace(/_/g, " "))}</span>`;
 }
 
 /* ---------- navigation ---------- */
-function showView(name) {
+function showView(name, { deferLoad = false } = {}) {
   for (const s of document.querySelectorAll("main section")) s.hidden = true;
   $(`view-${name}`).hidden = false;
   for (const b of document.querySelectorAll("#nav button[data-view]"))
     b.classList.toggle("active", b.dataset.view === name);
-  loadView(name);
+  if (!deferLoad) loadView(name);
 }
 
 async function loadView(name) {
@@ -362,7 +368,7 @@ function renderStockList() {
         .map(
           (r) => `<tr>
             <td class="mono">${esc(r.fingerprint)}…</td>
-            <td>${orderBadge(r.state)}</td>
+            <td>${stockBadge(r.state)}</td>
             <td class="mono">${esc(timeAgo(r.created_at))}</td>
             <td>${r.assigned ? "✓" : "—"}</td>
           </tr>`,
@@ -377,7 +383,7 @@ function updateLineCount() {
 }
 
 /* ---------- orders ---------- */
-const ORDER_STATES = ["", "invoice", "checkout", "delivering", "delivered", "delivery_failed", "needs_refund", "refunded"];
+const ORDER_STATES = ["", "invoice", "checkout", "expired", "delivering", "delivered", "delivery_failed", "needs_refund", "refunded"];
 
 function renderOrderChips() {
   $("o-state-chips").innerHTML = ORDER_STATES.map(
@@ -483,7 +489,7 @@ document.querySelector("#view-overview").addEventListener("click", (e) => {
   if (goto) showView(goto.dataset.goto);
   const addstock = e.target.closest("[data-addstock]");
   if (addstock) {
-    showView("stock");
+    showView("stock", { deferLoad: true });
     loadStock(addstock.dataset.addstock).catch((err) => toast(err.message, true));
   }
 });
@@ -534,7 +540,7 @@ $("products-list").addEventListener("click", async (e) => {
       const product = productsCache.find((p) => p.sku === edit.dataset.edit);
       if (product) openProductDialog(product);
     } else if (addstock) {
-      showView("stock");
+      showView("stock", { deferLoad: true });
       await loadStock(addstock.dataset.addstock);
     } else if (toggle) {
       const product = productsCache.find((p) => p.sku === toggle.dataset.toggle);
