@@ -62,8 +62,11 @@ jobs:
                   -H "Content-Type: application/json" \
                   -d @-)"
             if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-              echo "::error::${label}: Supabase API returned HTTP ${status}"
-              cat "$body"; echo
+              # stderr: callers redirect stdout to /dev/null
+              {
+                echo "::error::${label}: Supabase API returned HTTP ${status}"
+                echo "::group::API response (${label})"; cat "$body"; echo; echo "::endgroup::"
+              } >&2
               rm -f "$body"
               return 1
             fi
@@ -76,18 +79,24 @@ jobs:
             applied_at timestamptz not null default now()
           );" > /dev/null
 
+          # Diagnostics: what does the database already contain?
+          echo "::group::database state"
+          run_sql "history" "select filename, applied_at from _applied_migrations order by filename;"; echo
+          run_sql "tables" "select string_agg(tablename, ', ' order by tablename) as tables from pg_tables where schemaname = 'public';"; echo
+          run_sql "functions" "select string_agg(p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') -> ' || pg_get_function_result(p.oid), '; ' order by p.proname) as functions from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public';"; echo
+          echo "::endgroup::"
+
           # First run against a database that was migrated by hand: backfill.
           history_count="$(run_sql "count history" "select count(*)::int as n from _applied_migrations;" | jq -r '.[0].n')"
-          if [ "$history_count" = "0" ]; then
-            marker="$(run_sql "probe marker" "select to_regprocedure('${BACKFILL_MARKER}') is not null as present;" | jq -r '.[0].present')"
-            if [ "$marker" = "true" ]; then
-              values=""
-              for name in $BACKFILL_FILES; do
-                values="${values:+${values},}('${name}')"
-              done
-              run_sql "backfill" "insert into _applied_migrations (filename) values ${values} on conflict do nothing;" > /dev/null
-              echo "::notice::backfilled history for hand-applied migrations: ${BACKFILL_FILES}"
-            fi
+          marker="$(run_sql "probe marker" "select to_regprocedure('${BACKFILL_MARKER}') is not null as present;" | jq -r '.[0].present')"
+          echo "history_count=${history_count} marker(${BACKFILL_MARKER})=${marker}"
+          if [ "$history_count" = "0" ] && [ "$marker" = "true" ]; then
+            values=""
+            for name in $BACKFILL_FILES; do
+              values="${values:+${values},}('${name}')"
+            done
+            run_sql "backfill" "insert into _applied_migrations (filename) values ${values} on conflict do nothing;" > /dev/null
+            echo "::notice::backfilled history for hand-applied migrations: ${BACKFILL_FILES}"
           fi
 
           for f in supabase/migrations/*.sql; do
