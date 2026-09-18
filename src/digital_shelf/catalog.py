@@ -1,5 +1,6 @@
 """Canonical catalog entities and product delivery-policy validation."""
 
+import json
 import re
 from enum import StrEnum
 from typing import Self
@@ -102,6 +103,7 @@ class CategoryCreateCommand(BaseModel):
 
     slug: str
     name: str
+    parent_id: UUID | None = None
     description: str = ""
     emoji: str | None = None
     position: StrictInt = Field(default=0, ge=0)
@@ -149,6 +151,10 @@ class ProductCreateCommand(BaseModel):
             raise ValueError(f"fulfillment/inventory policy: {reasons[0]}")
         if self.status not in {ProductStatus.DRAFT, ProductStatus.READY}:
             raise ValueError("product status must be draft or ready at creation")
+        try:
+            json.dumps(self.metadata, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("product metadata must be JSON serializable") from exc
         return self
 
 

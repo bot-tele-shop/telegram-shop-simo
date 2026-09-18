@@ -27,6 +27,17 @@ from digital_shelf.auth import (
     TokenVerifier,
     parse_bearer_token,
 )
+from digital_shelf.catalog import CategoryCreateCommand, ProductCreateCommand
+from digital_shelf.catalog_admin import (
+    CatalogStore,
+    CategoryConflictError,
+    CategoryNotFoundError,
+    CategoryView,
+    DatabaseCatalogStore,
+    ProductConflictError,
+    ProductNotFoundError,
+    ProductView,
+)
 from digital_shelf.config import Settings, get_settings
 from digital_shelf.db import create_engine, database_ready
 from digital_shelf.features import FeatureKey
@@ -50,6 +61,7 @@ def create_app(
     feature_store: FeatureStore | None = None,
     setting_store: SettingStore | None = None,
     audit_store: AuditStore | None = None,
+    catalog_store: CatalogStore | None = None,
 ) -> FastAPI:
     runtime_settings = settings or get_settings()
 
@@ -68,6 +80,7 @@ def create_app(
         app.state.feature_store = feature_store or DatabaseFeatureStore(app.state.engine)
         app.state.setting_store = setting_store or DatabaseSettingStore(app.state.engine)
         app.state.audit_store = audit_store or DatabaseAuditStore(app.state.engine)
+        app.state.catalog_store = catalog_store or DatabaseCatalogStore(app.state.engine)
         yield
         await app.state.engine.dispose()
 
@@ -211,6 +224,72 @@ def create_app(
         require_permission(admin, "audit.read")
         store: AuditStore = request.app.state.audit_store
         return list(await store.list_events(limit=limit))
+
+    @application.get("/admin/v1/categories", response_model=list[CategoryView], tags=["admin"])
+    async def list_categories(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> list[CategoryView]:
+        require_permission(admin, "catalog.read")
+        store: CatalogStore = request.app.state.catalog_store
+        return list(await store.list_categories())
+
+    @application.post(
+        "/admin/v1/categories",
+        response_model=CategoryView,
+        status_code=status.HTTP_201_CREATED,
+        tags=["admin"],
+    )
+    async def create_category(
+        command: CategoryCreateCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> CategoryView:
+        require_permission(admin, "catalog.manage")
+        store: CatalogStore = request.app.state.catalog_store
+        try:
+            return await store.create_category(
+                command=command,
+                actor_admin_id=admin.admin_id,
+                correlation_id=request.state.correlation_id,
+            )
+        except CategoryNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "parent category not found") from exc
+        except CategoryConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "category slug already exists") from exc
+
+    @application.get("/admin/v1/products", response_model=list[ProductView], tags=["admin"])
+    async def list_products(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> list[ProductView]:
+        require_permission(admin, "catalog.read")
+        store: CatalogStore = request.app.state.catalog_store
+        return list(await store.list_products())
+
+    @application.post(
+        "/admin/v1/products",
+        response_model=ProductView,
+        status_code=status.HTTP_201_CREATED,
+        tags=["admin"],
+    )
+    async def create_product(
+        command: ProductCreateCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> ProductView:
+        require_permission(admin, "catalog.manage")
+        store: CatalogStore = request.app.state.catalog_store
+        try:
+            return await store.create_product(
+                command=command,
+                actor_admin_id=admin.admin_id,
+                correlation_id=request.state.correlation_id,
+            )
+        except ProductNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "category not found") from exc
+        except ProductConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "product SKU already exists") from exc
 
     return application
 

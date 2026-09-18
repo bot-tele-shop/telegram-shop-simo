@@ -14,6 +14,8 @@ from digital_shelf.admin import (
 )
 from digital_shelf.admin_audit import DatabaseAuditStore
 from digital_shelf.auth import AuthenticatedIdentity
+from digital_shelf.catalog import CategoryCreateCommand, ProductCreateCommand
+from digital_shelf.catalog_admin import DatabaseCatalogStore
 from digital_shelf.db import create_engine, database_ready
 from digital_shelf.features import FeatureKey, FeatureState
 from digital_shelf.store_settings import (
@@ -279,6 +281,42 @@ def test_bootstrap_migration_and_readiness_against_postgres() -> None:
                     {"product_id": product_id},
                 )
             assert active_product_count == 1
+
+            catalog_store = DatabaseCatalogStore(engine)
+            managed_category = await catalog_store.create_category(
+                command=CategoryCreateCommand(slug="managed", name="Managed"),
+                actor_admin_id=principal.admin_id,
+                correlation_id=uuid4(),
+            )
+            managed_product = await catalog_store.create_product(
+                command=ProductCreateCommand(
+                    category_id=managed_category.id,
+                    sku="notion-template",
+                    title="Notion Template",
+                    description="Reusable template",
+                    price_stars=10,
+                    fulfillment_type="reusable_content",
+                    inventory_policy="unlimited",
+                ),
+                actor_admin_id=principal.admin_id,
+                correlation_id=uuid4(),
+            )
+            assert managed_product.sku == "NOTION-TEMPLATE"
+            assert len(await catalog_store.list_categories()) == 2
+            assert len(await catalog_store.list_products()) == 2
+
+            async with engine.connect() as connection:
+                catalog_audit_count = await connection.scalar(
+                    text(
+                        """
+                        SELECT count(*) FROM digital_shelf.audit_events
+                        WHERE actor_admin_id = :admin_id
+                          AND action IN ('category.create', 'product.create')
+                        """
+                    ),
+                    {"admin_id": principal.admin_id},
+                )
+            assert catalog_audit_count == 2
         finally:
             await engine.dispose()
 
