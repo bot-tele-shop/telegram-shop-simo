@@ -185,6 +185,15 @@ class Pricer:
                     # Keep the preflight cap tracking the new cost so checkout
                     # still blocks if the supplier jumps again between syncs.
                     new_cap = cost * (1 + Decimal(rule["max_jump_pct"]) / Decimal(100))
+                    # Router-managed SKUs also carry the owner's approved
+                    # per-candidate cap; never derive above it.
+                    cand = db.execute(
+                        "SELECT max_cost FROM supplier_candidates "
+                        "WHERE sku=? AND provider=? AND product_id=? AND active=1",
+                        (sku, mapping.get("provider", ""), mapping["product_id"]),
+                    ).fetchone()
+                    if cand:
+                        new_cap = min(new_cap, money(cand["max_cost"], positive=True))
                     spec = dict(mapping)
                     spec["max_cost"] = str(new_cap.quantize(Decimal("0.0001")))
                     db.execute(

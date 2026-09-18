@@ -26,6 +26,7 @@ from .config import PROJECT_ROOT, CanbosoSettings, initialize_config, load_setti
 from .delivery import DeliveryWorker
 from .polling import DurablePolling
 from .pricing import Pricer
+from .router import Router
 from .store import ShopError, Store
 from .supplier_worker import SupplierWorker
 
@@ -97,7 +98,8 @@ async def run_bot(settings, store: Store) -> None:
                 transport = HttpTransport(supplier_session)
                 client = CanbosoClient(settings.canboso, transport, settings.environment)
                 supplier = SupplierWorker(store, client, worker,
-                                          pricer=Pricer(store, settings.stars_fx))
+                                          pricer=Pricer(store, settings.stars_fx),
+                                          router=Router(store, settings.stars_fx))
                 worker.also_wake.append(supplier.kick)
             tasks = []
             try:
@@ -209,6 +211,18 @@ def read_private_text(path: Path, limit: int, label: str) -> str:
         raise ShopError(f"{label} file must contain UTF-8 text") from None
 
 
+def cached_products_snapshot(store, settings, max_age: int) -> dict:
+    """Decrypted supplier products cache for CLI dry runs; no network."""
+    with store.connection() as db:
+        row = db.execute("SELECT * FROM supplier_cache WHERE name='products'").fetchone()
+    if not row or row["key_hash"] != settings.canboso.key_fingerprint:
+        raise ShopError("No supplier snapshot cached for this buyer key; run supplier-sync first")
+    age = store.clock() - row["fetched_at"]
+    if age > max_age:
+        raise ShopError(f"Cached supplier snapshot is {int(age)}s old; sync first or pass --max-age")
+    return store.supplier.decrypt(row["ciphertext"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Digital Shelf - Telegram Stars shop")
     parser.add_argument("--config", type=Path, help="Local JSON configuration path")
@@ -267,6 +281,27 @@ def main() -> int:
     pevents = pricing_sub.add_parser("events", help="Show recent price change events")
     pevents.add_argument("--sku")
     pevents.add_argument("--limit", type=int, default=20)
+    route = sub.add_parser("route", help="Manage cheapest-wins supplier routing")
+    route_sub = route.add_subparsers(dest="route_command", required=True)
+    radd = route_sub.add_parser("add", help="Add a supplier candidate for a SKU")
+    radd.add_argument("--sku", required=True)
+    radd.add_argument("--provider", required=True)
+    radd.add_argument("--product-id", required=True)
+    radd.add_argument("--product-type", choices=("account", "slot"), required=True)
+    radd.add_argument("--currency", choices=("USD", "VND"), required=True)
+    radd.add_argument("--max-cost", required=True,
+                      help="Approved cost ceiling in provider currency")
+    rdel = route_sub.add_parser("remove", help="Remove a supplier candidate")
+    rdel.add_argument("--sku", required=True)
+    rdel.add_argument("--provider", required=True)
+    rdel.add_argument("--product-id", required=True)
+    rlist = route_sub.add_parser("list", help="List routing candidates")
+    rlist.add_argument("--sku")
+    rpreview = route_sub.add_parser(
+        "preview", help="Dry-run routing against the cached supplier snapshot (no changes)"
+    )
+    rpreview.add_argument("--max-age", type=int, default=900,
+                          help="Maximum snapshot age in seconds (default 900)")
     sub.add_parser("run", help="Connect the configured bot and begin polling")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -395,18 +430,7 @@ def main() -> int:
                 )
                 print(f"Pricing rule saved for {args.sku} ({args.mode}).")
             elif args.pricing_command == "preview":
-                with store.connection() as db:
-                    row = db.execute(
-                        "SELECT * FROM supplier_cache WHERE name='products'"
-                    ).fetchone()
-                if not row or row["key_hash"] != settings.canboso.key_fingerprint:
-                    raise ShopError("No supplier snapshot cached for this buyer key; run supplier-sync first")
-                age = store.clock() - row["fetched_at"]
-                if age > args.max_age:
-                    raise ShopError(
-                        f"Cached supplier snapshot is {int(age)}s old; sync first or pass --max-age"
-                    )
-                snapshot = store.supplier.decrypt(row["ciphertext"])
+                snapshot = cached_products_snapshot(store, settings, args.max_age)
                 changes = pricer.reprice(snapshot, dry_run=True)
                 if not changes:
                     print("No price changes would be applied.")
@@ -423,6 +447,40 @@ def main() -> int:
                         f"{event['new_price']} Stars (cost {event['old_cost']} -> "
                         f"{event['new_cost']}){flag}"
                     )
+        elif args.command == "route":
+            router = Router(store, settings.stars_fx)
+            if args.route_command == "add":
+                router.add_candidate(
+                    args.sku, provider=args.provider, product_id=args.product_id,
+                    product_type=args.product_type, currency=args.currency,
+                    max_cost=args.max_cost,
+                )
+                print(f"Candidate {args.provider}:{args.product_id} added for {args.sku}.")
+            elif args.route_command == "remove":
+                router.remove_candidate(args.sku, provider=args.provider,
+                                        product_id=args.product_id)
+                print(f"Candidate {args.provider}:{args.product_id} removed from {args.sku}.")
+            elif args.route_command == "list":
+                rows = router.candidates(args.sku)
+                if not rows:
+                    print("No routing candidates yet. Use: python -m shop route add --sku <sku> ...")
+                for r in rows:
+                    state = "active" if r["active"] else "disabled"
+                    print(f"{r['sku']}: {r['provider']}:{r['product_id']} "
+                          f"({r['product_type']}, {r['currency']}, cap {r['max_cost']}) [{state}]")
+            elif args.route_command == "preview":
+                snapshot = cached_products_snapshot(store, settings, args.max_age)
+                decisions = router.route({"canboso": snapshot}, dry_run=True)
+                if not decisions:
+                    print("No routing candidates to evaluate.")
+                for d in decisions:
+                    if d.winner is None:
+                        print(f"{d.sku}: NO WINNER ({d.reason})")
+                    else:
+                        mark = " [would switch]" if d.changed else ""
+                        print(f"{d.sku}: {d.winner} cost {d.cost} "
+                              f"(~{d.cost_stars} Stars){mark}")
+                print("Dry run only; nothing was changed.")
         elif args.command == "run":
             with process_lock(settings.database_path.with_suffix(".process.lock")):
                 asyncio.run(run_bot(settings, store))
