@@ -2,7 +2,9 @@
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
+from cryptography.fernet import Fernet
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -33,14 +35,52 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     webhook_path_secret: SecretStr | None = None
     webhook_header_secret: SecretStr | None = None
+    supabase_auth_issuer: str | None = None
+    admin_jwt_audience: str = "authenticated"
+    inventory_encryption_key: SecretStr | None = None
+    inventory_key_version: str = "v1"
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
+        if self.supabase_auth_issuer is not None:
+            issuer = self.supabase_auth_issuer.rstrip("/")
+            parsed = urlsplit(issuer)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.query
+                or parsed.fragment
+                or not parsed.path.endswith("/auth/v1")
+            ):
+                raise ValueError("supabase_auth_issuer must be an HTTPS Auth issuer URL")
+            self.supabase_auth_issuer = issuer
+
+        if not self.admin_jwt_audience.strip():
+            raise ValueError("admin_jwt_audience must not be empty")
+
+        if not 1 <= len(self.inventory_key_version.strip()) <= 64:
+            raise ValueError("inventory_key_version must be 1-64 characters")
+
         if self.environment != "production":
             return self
 
         if self.database_url.get_secret_value() == _DEVELOPMENT_DATABASE_URL:
             raise ValueError("production requires a non-default database URL")
+
+        if self.supabase_auth_issuer is None:
+            raise ValueError("production requires supabase_auth_issuer")
+
+        inventory_key = (
+            self.inventory_encryption_key.get_secret_value().strip()
+            if self.inventory_encryption_key
+            else ""
+        )
+        if not inventory_key:
+            raise ValueError("production requires inventory_encryption_key")
+        try:
+            Fernet(inventory_key.encode())
+        except (TypeError, ValueError) as exc:
+            raise ValueError("production requires a valid inventory_encryption_key") from exc
 
         for name in ("webhook_path_secret", "webhook_header_secret"):
             secret = getattr(self, name)
@@ -48,6 +88,12 @@ class Settings(BaseSettings):
             if len(value) < 32 or value.lower() in _FORBIDDEN_SECRET_VALUES:
                 raise ValueError(f"production requires a strong {name}")
         return self
+
+    @property
+    def supabase_jwks_url(self) -> str | None:
+        if self.supabase_auth_issuer is None:
+            return None
+        return f"{self.supabase_auth_issuer}/.well-known/jwks.json"
 
 
 @lru_cache(maxsize=1)

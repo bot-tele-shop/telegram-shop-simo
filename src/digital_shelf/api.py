@@ -1,17 +1,79 @@
 """FastAPI entry point for the canonical application."""
 
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from digital_shelf.admin import (
+    AdminAuthorizer,
+    AdminPrincipal,
+    AuthorizationError,
+    DatabaseAdminAuthorizer,
+    DatabaseFeatureStore,
+    FeatureNotFoundError,
+    FeatureStore,
+    FeatureUpdateCommand,
+    FeatureView,
+    RevisionConflictError,
+)
+from digital_shelf.admin_audit import AuditEventView, AuditStore, DatabaseAuditStore
+from digital_shelf.auth import (
+    AuthenticationError,
+    SupabaseJWTVerifier,
+    TokenVerifier,
+    parse_bearer_token,
+)
+from digital_shelf.catalog import CategoryCreateCommand, ProductCreateCommand
+from digital_shelf.catalog_admin import (
+    CatalogStore,
+    CategoryConflictError,
+    CategoryNotFoundError,
+    CategoryView,
+    DatabaseCatalogStore,
+    ProductConflictError,
+    ProductNotFoundError,
+    ProductView,
+)
 from digital_shelf.config import Settings, get_settings
 from digital_shelf.db import create_engine, database_ready
+from digital_shelf.features import FeatureKey
+from digital_shelf.inventory import InventoryCipher, InventoryImportPreview
+from digital_shelf.inventory_admin import (
+    DatabaseInventoryStore,
+    InventoryCommitCommand,
+    InventoryImportCommand,
+    InventoryImportResult,
+    InventoryPolicyError,
+    InventoryStore,
+)
+from digital_shelf.inventory_admin import ProductNotFoundError as InventoryProductNotFoundError
 from digital_shelf.logging import configure_logging
+from digital_shelf.store_settings import (
+    DatabaseSettingStore,
+    InvalidSettingValueError,
+    SettingRevisionConflictError,
+    SettingsPatchCommand,
+    SettingStore,
+    SettingView,
+    validate_settings_command,
+)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    jwt_verifier: TokenVerifier | None = None,
+    admin_authorizer: AdminAuthorizer | None = None,
+    feature_store: FeatureStore | None = None,
+    setting_store: SettingStore | None = None,
+    audit_store: AuditStore | None = None,
+    catalog_store: CatalogStore | None = None,
+    inventory_store: InventoryStore | None = None,
+) -> FastAPI:
     runtime_settings = settings or get_settings()
 
     @asynccontextmanager
@@ -19,6 +81,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         configure_logging(runtime_settings.log_level)
         app.state.settings = runtime_settings
         app.state.engine = create_engine(runtime_settings.database_url.get_secret_value())
+        app.state.jwt_verifier = jwt_verifier
+        if app.state.jwt_verifier is None and runtime_settings.supabase_auth_issuer is not None:
+            app.state.jwt_verifier = SupabaseJWTVerifier(
+                issuer=runtime_settings.supabase_auth_issuer,
+                audience=runtime_settings.admin_jwt_audience,
+            )
+        app.state.admin_authorizer = admin_authorizer or DatabaseAdminAuthorizer(app.state.engine)
+        app.state.feature_store = feature_store or DatabaseFeatureStore(app.state.engine)
+        app.state.setting_store = setting_store or DatabaseSettingStore(app.state.engine)
+        app.state.audit_store = audit_store or DatabaseAuditStore(app.state.engine)
+        app.state.catalog_store = catalog_store or DatabaseCatalogStore(app.state.engine)
+        app.state.inventory_store = inventory_store
+        if app.state.inventory_store is None and runtime_settings.inventory_encryption_key:
+            app.state.inventory_store = DatabaseInventoryStore(
+                app.state.engine,
+                InventoryCipher(
+                    key=runtime_settings.inventory_encryption_key.get_secret_value(),
+                    key_version=runtime_settings.inventory_key_version,
+                ),
+            )
         yield
         await app.state.engine.dispose()
 
@@ -29,6 +111,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+
+    @application.middleware("http")
+    async def correlation_id(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        request.state.correlation_id = uuid4()
+        response = await call_next(request)
+        response.headers["X-Correlation-ID"] = str(request.state.correlation_id)
+        return response
+
+    async def current_admin(
+        request: Request,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> AdminPrincipal:
+        verifier: TokenVerifier | None = request.app.state.jwt_verifier
+        if verifier is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "admin authentication unavailable")
+        try:
+            token = parse_bearer_token(authorization)
+            identity = await verifier.verify(token)
+            authorizer: AdminAuthorizer = request.app.state.admin_authorizer
+            return await authorizer.authorize(identity)
+        except AuthenticationError as exc:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                "authentication required",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from exc
+        except AuthorizationError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "permission denied") from exc
+
+    def require_permission(admin: AdminPrincipal, permission: str) -> None:
+        if not admin.allows(permission):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "permission denied")
 
     @application.get("/live", tags=["health"])
     async def live() -> dict[str, str]:
@@ -41,6 +158,219 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return {"status": "unavailable"}
         return {"status": "ready"}
+
+    @application.get("/admin/v1/features", response_model=list[FeatureView], tags=["admin"])
+    async def list_features(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> list[FeatureView]:
+        require_permission(admin, "features.read")
+        store: FeatureStore = request.app.state.feature_store
+        return list(await store.list_features())
+
+    @application.patch(
+        "/admin/v1/features/{feature_key}",
+        response_model=FeatureView,
+        tags=["admin"],
+    )
+    async def update_feature(
+        feature_key: str,
+        command: FeatureUpdateCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> FeatureView:
+        require_permission(admin, "features.manage")
+        try:
+            feature = FeatureKey(feature_key)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown feature key") from exc
+        store: FeatureStore = request.app.state.feature_store
+        correlation = request.state.correlation_id
+        if not isinstance(correlation, UUID):
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "correlation unavailable")
+        try:
+            return await store.update_feature(
+                feature=feature,
+                command=command,
+                actor_admin_id=admin.admin_id,
+                correlation_id=correlation,
+            )
+        except FeatureNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown feature key") from exc
+        except RevisionConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "feature changed; reload and retry") from exc
+
+    @application.get("/admin/v1/settings", response_model=list[SettingView], tags=["admin"])
+    async def list_settings(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> list[SettingView]:
+        require_permission(admin, "settings.read")
+        store: SettingStore = request.app.state.setting_store
+        return list(await store.list_settings())
+
+    @application.patch("/admin/v1/settings", response_model=list[SettingView], tags=["admin"])
+    async def update_settings(
+        command: SettingsPatchCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> list[SettingView]:
+        require_permission(admin, "settings.manage")
+        try:
+            validate_settings_command(command)
+        except KeyError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown setting key") from exc
+        except InvalidSettingValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid setting value") from exc
+
+        store: SettingStore = request.app.state.setting_store
+        try:
+            return list(
+                await store.update_settings(
+                    command=command,
+                    actor_admin_id=admin.admin_id,
+                    correlation_id=request.state.correlation_id,
+                )
+            )
+        except SettingRevisionConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "setting changed; reload and retry") from exc
+
+    @application.get("/admin/v1/audit", response_model=list[AuditEventView], tags=["admin"])
+    async def list_audit_events(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[AuditEventView]:
+        require_permission(admin, "audit.read")
+        store: AuditStore = request.app.state.audit_store
+        return list(await store.list_events(limit=limit))
+
+    @application.get("/admin/v1/categories", response_model=list[CategoryView], tags=["admin"])
+    async def list_categories(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> list[CategoryView]:
+        require_permission(admin, "catalog.read")
+        store: CatalogStore = request.app.state.catalog_store
+        return list(await store.list_categories())
+
+    @application.post(
+        "/admin/v1/categories",
+        response_model=CategoryView,
+        status_code=status.HTTP_201_CREATED,
+        tags=["admin"],
+    )
+    async def create_category(
+        command: CategoryCreateCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> CategoryView:
+        require_permission(admin, "catalog.manage")
+        store: CatalogStore = request.app.state.catalog_store
+        try:
+            return await store.create_category(
+                command=command,
+                actor_admin_id=admin.admin_id,
+                correlation_id=request.state.correlation_id,
+            )
+        except CategoryNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "parent category not found") from exc
+        except CategoryConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "category slug already exists") from exc
+
+    @application.get("/admin/v1/products", response_model=list[ProductView], tags=["admin"])
+    async def list_products(
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> list[ProductView]:
+        require_permission(admin, "catalog.read")
+        store: CatalogStore = request.app.state.catalog_store
+        return list(await store.list_products())
+
+    @application.post(
+        "/admin/v1/products",
+        response_model=ProductView,
+        status_code=status.HTTP_201_CREATED,
+        tags=["admin"],
+    )
+    async def create_product(
+        command: ProductCreateCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> ProductView:
+        require_permission(admin, "catalog.manage")
+        store: CatalogStore = request.app.state.catalog_store
+        try:
+            return await store.create_product(
+                command=command,
+                actor_admin_id=admin.admin_id,
+                correlation_id=request.state.correlation_id,
+            )
+        except ProductNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "category not found") from exc
+        except ProductConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "product SKU already exists") from exc
+
+    @application.post(
+        "/admin/v1/products/{product_id}/inventory/preview",
+        response_model=InventoryImportPreview,
+        tags=["admin"],
+    )
+    async def preview_inventory(
+        product_id: UUID,
+        command: InventoryImportCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> InventoryImportPreview:
+        require_permission(admin, "inventory.manage")
+        store: InventoryStore | None = request.app.state.inventory_store
+        if store is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "inventory service unavailable",
+            )
+        try:
+            return await store.preview(product_id=product_id, lines=command.lines)
+        except InventoryProductNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "product not found") from exc
+        except InventoryPolicyError as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "product does not use unique inventory",
+            ) from exc
+
+    @application.post(
+        "/admin/v1/products/{product_id}/inventory/commit",
+        response_model=InventoryImportResult,
+        tags=["admin"],
+    )
+    async def commit_inventory(
+        product_id: UUID,
+        command: InventoryCommitCommand,
+        request: Request,
+        admin: Annotated[AdminPrincipal, Depends(current_admin)],
+    ) -> InventoryImportResult:
+        require_permission(admin, "inventory.manage")
+        store: InventoryStore | None = request.app.state.inventory_store
+        if store is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "inventory service unavailable",
+            )
+        try:
+            return await store.commit(
+                product_id=product_id,
+                lines=command.lines,
+                actor_admin_id=admin.admin_id,
+                correlation_id=request.state.correlation_id,
+            )
+        except InventoryProductNotFoundError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "product not found") from exc
+        except InventoryPolicyError as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "product does not use unique inventory",
+            ) from exc
 
     return application
 
