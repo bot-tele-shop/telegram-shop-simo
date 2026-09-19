@@ -4,7 +4,8 @@ State is provider-agnostic: every snapshot, cooldown, budget and purchase
 intent is scoped to one registered provider (see shop/providers.py), so
 several suppliers can serve the shop without sharing wallets or quotas.
 
-There is no documented supplier order-status or refund endpoint. An uncertain
+Where a provider documents an order-status or history endpoint, an uncertain
+purchase is recovered read-only through it; where none exists, an uncertain
 purchase never becomes a new purchase automatically. Approved manual resolutions
 and cost-risk acknowledgments are durable and visible in the operator workflow.
 """
@@ -280,7 +281,7 @@ class SupplierState:
         provider = spec["provider"]
         settings = self.settings_for(provider)
         self._check_quote(db, spec)
-        body = providers.build_request(spec, settings, email)
+        body = providers.build_request(spec, settings, email, order_id=order_id)
         now = self.store.clock()
         db.execute(
             "INSERT INTO supplier_intents(order_id,idempotency_key,request_ciphertext,key_hash,"
@@ -479,6 +480,51 @@ class SupplierState:
         else:
             db.execute("UPDATE supplier_intents SET hold_reason='external_customer_refund' WHERE order_id=?", (order_id,))
 
+    def uncertain_intents(self) -> list[dict]:
+        """Full rows for uncertain intents, for read-only provider recovery."""
+        with self.store.connection() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT * FROM supplier_intents WHERE state='uncertain' ORDER BY created_at LIMIT 20")]
+
+    def complete_recovered(self, order_id: str, result: PurchaseResult) -> str | None:
+        """Apply a purchase result obtained from a provider's documented
+        order-lookup/history endpoint to an uncertain intent. Same hold checks
+        as finish(); nothing is re-sent and no evidence is discarded.
+        Returns the hold reason when the result was held for an operator
+        (the intent stays uncertain and is re-checked slowly, not every pass)."""
+        with self.store.transaction() as db:
+            row = db.execute("SELECT i.*,o.state AS order_state FROM supplier_intents i "
+                             "JOIN orders o ON o.id=i.order_id WHERE i.order_id=?", (order_id,)).fetchone()
+            if not row:
+                raise ShopError("Supplier order not found")
+            if row["state"] != "uncertain":
+                raise ShopError("Only an uncertain supplier order can be recovered by lookup")
+            hold = None
+            if result.currency != row["currency"] or result.amount > money(row["max_cost"]):
+                hold = "supplier_price_or_currency_changed"
+            if result.product_type and result.product_type != row["product_type"]:
+                hold = "supplier_product_type_mismatch"
+            if row["order_state"] != "paid":
+                hold = "customer_payment_no_longer_payable"
+            state = "uncertain" if hold else result.status
+            # A held result still needs an operator: re-check hourly at most,
+            # so auto-recovery cannot hot-loop on it or spam notifications.
+            next_attempt = self.store.clock() + 3600 if hold else 0
+            db.execute("UPDATE supplier_intents SET state=?,response_ciphertext=?,delivery_ciphertext=?,"
+                       "supplier_reference=?,actual_cost=?,hold_reason=?,lease_until=0,"
+                       "next_attempt_at=?,resolution_version=resolution_version+1,updated_at=? "
+                       "WHERE order_id=?",
+                       (state, self.encrypt(result.raw), self.encrypt(result.payload),
+                        result.reference, str(result.amount),
+                        hold or "recovered_via_supplier_lookup", next_attempt,
+                        self.store.clock(), order_id))
+            if state == "completed":
+                self._allocate_delivery(db, order_id, result.payload, row["provider"])
+            else:
+                db.execute("UPDATE orders SET error_code=? WHERE id=? AND state='paid'",
+                           ("supplier_" + state, order_id))
+        return hold
+
     def review(self) -> list[dict]:
         with self.store.connection() as db:
             return [dict(r) for r in db.execute(
@@ -500,6 +546,11 @@ class SupplierState:
                 raise ShopError("This supplier order cannot be manually resolved in its current state")
             provider = row["provider"]
             if action == "retry_same_request":
+                if not providers.idempotent_purchases(provider):
+                    raise ShopError(
+                        f"{providers.display(provider)} has no purchase idempotency; never resend "
+                        "a purchase. Wait for history-based recovery or stop for refund"
+                    )
                 self.assert_enabled(provider)
                 if row["state"] == "pending" or row["key_hash"] != self.settings_for(provider).key_fingerprint:
                     raise ShopError("Do not retry an accepted pending order or change the buyer key")

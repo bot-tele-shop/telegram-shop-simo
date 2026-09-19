@@ -31,10 +31,10 @@ PROVIDERS: dict[str, Provider] = {
     for entry in (
         Provider("canboso", "Canboso", "canboso", "CANBOSO_API_KEY", documented=True),
         Provider("jaha_digital", "Jaha Digital", "jaha_digital", "JAHA_DIGITAL_API_KEY",
-                 documented=False),
+                 documented=True),
         Provider("elite_emporium", "Elite Digital Emporium", "elite_emporium",
-                 "ELITE_EMPORIUM_API_KEY", documented=False),
-        Provider("acczone", "Acczone", "acczone", "ACCZONE_API_KEY", documented=False),
+                 "ELITE_EMPORIUM_API_KEY", documented=True),
+        Provider("acczone", "Acczone", "acczone", "ACCZONE_API_KEY", documented=True),
     )
 }
 
@@ -60,7 +60,35 @@ def _hooks(name: str):
     if name == "canboso":
         from . import canboso
         return canboso
+    if name == "jaha_digital":
+        from . import jaha_digital
+        return jaha_digital
+    if name == "elite_emporium":
+        from . import elite_emporium
+        return elite_emporium
+    if name == "acczone":
+        from . import acczone
+        return acczone
     return None
+
+
+def hooks_for(name: str):
+    """Public handle on a provider's client module (or None), for store and
+    worker code that needs provider capabilities like IDEMPOTENT_PURCHASES."""
+    return _hooks(name)
+
+
+def idempotent_purchases(name: str) -> bool:
+    """Whether an approved retry can safely resend the same purchase request.
+    Providers without native idempotency must never re-send a purchase."""
+    hooks = _hooks(name)
+    return bool(getattr(hooks, "IDEMPOTENT_PURCHASES", True)) if hooks else False
+
+
+def client_module(name: str):
+    """The client module for a documented provider (Client + HttpTransport),
+    or None when no documented buyer API client exists."""
+    return _hooks(name)
 
 
 def validate_spec(specification: dict) -> None:
@@ -73,7 +101,8 @@ def validate_spec(specification: dict) -> None:
         raise ShopError("Do not send slot_months for catalog slots or account products")
 
 
-def build_request(specification: dict, settings, email: str | None) -> dict:
+def build_request(specification: dict, settings, email: str | None,
+                  *, order_id: str = "") -> dict:
     """The exact, immutable purchase body for one provider. Undocumented
     providers never reach the network: there is no request to build."""
     provider = str(specification.get("provider", ""))
@@ -83,4 +112,4 @@ def build_request(specification: dict, settings, email: str | None) -> dict:
             f"{display(provider)} purchasing is not connected: this supplier has no "
             "documented buyer API client yet"
         )
-    return hooks.build_purchase_body(settings, specification, email)
+    return hooks.build_purchase_body(settings, specification, email, order_id=order_id)

@@ -11,7 +11,7 @@ Two runtimes, one codebase:
 
 | Path | What it is | Where it runs |
 |---|---|---|
-| `shop/` | Full bot: polling mode, admin CLI, encrypted SQLite stock, multi-provider supplier pipeline (Canboso live; Jaha Digital, Elite Digital Emporium, Acczone registered pending API docs), 693 tests | Any server / locally |
+| `shop/` | Full bot: polling mode, admin CLI, encrypted SQLite stock, multi-provider supplier pipeline (Canboso, Jaha Digital, Elite Digital Emporium and Acczone live), 956 tests | Any server / locally |
 | `worker/` | Webhook buyer flow backed by Supabase Postgres | Cloudflare Workers |
 | `supabase/` | Database migrations (schema + atomic fulfillment RPCs) | Supabase |
 | `.github/workflows/` | CI + automatic Cloudflare deploy + secret sync | GitHub Actions |

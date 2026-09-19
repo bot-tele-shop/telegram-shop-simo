@@ -108,8 +108,12 @@ def test_registry_lists_canboso_and_the_new_suppliers():
         assert providers.entry(name) is not None
     assert not providers.registered("noshow")
     assert providers.display("jaha_digital") == "Jaha Digital"
-    assert providers.entry("canboso").documented
-    assert not providers.entry("acczone").documented
+    for name in ("canboso", "jaha_digital", "elite_emporium", "acczone"):
+        assert providers.entry(name).documented
+        assert providers.client_module(name) is not None
+    assert providers.client_module("noshow") is None
+    assert providers.idempotent_purchases("jaha_digital")
+    assert not providers.idempotent_purchases("acczone")
 
 
 def test_new_provider_config_sections_and_env_override(tmp_path, monkeypatch):
@@ -161,7 +165,7 @@ def test_mapping_accepts_new_providers_and_rejects_unknown(multi_store):
             "category": "Keys", "price_stars": 10, "source": "supplier",
             "active": True, "is_demo": False,
             "supplier": {"provider": "acczone", "product_id": "acc_pid_2",
-                         "product_type": "slot", "currency": "USD", "max_cost": "5",
+                         "product_type": "account", "currency": "USD", "max_cost": "5",
                          "slot_months": 3},
         })
 
@@ -198,27 +202,34 @@ def test_checkout_uses_only_the_owning_providers_snapshot(multi_store):
     # Canboso has the product id cached, Jaha does not: the order must fail.
     with pytest.raises(ShopError, match="not been synchronized"):
         multi_store.create_order(101, "jaha-item", "terms-v1")
-    # With Jaha's own snapshot, preflight passes and only the missing
-    # documented client stops the purchase (no order, no intent).
+    # With Jaha's own snapshot, preflight passes and the documented client
+    # hook builds the persisted request body (server-side price cap included).
     multi_store.supplier.cache_snapshot("jaha_digital", catalog("jaha_pid_1"), wallet())
-    with pytest.raises(ShopError, match="no documented buyer API client"):
-        multi_store.create_order(101, "jaha-item", "terms-v1")
-    assert multi_store.user_orders(101) == []
+    order = multi_store.create_order(101, "jaha-item", "terms-v1")
+    with multi_store.connection() as db:
+        intent = db.execute("SELECT * FROM supplier_intents WHERE order_id=?",
+                            (order["id"],)).fetchone()
+    assert intent["provider"] == "jaha_digital"
+    body = multi_store.supplier.decrypt(intent["request_ciphertext"])
+    assert body["product_code"] == "jaha_pid_1"
+    assert body["max_unit_price_usdt"] == "10"
+    assert body["external_order_id"] == f"ds-{order['id']}"
 
 
-def test_undocumented_provider_never_builds_a_purchase_request(multi_store):
-    supplier_product(multi_store, "acc-item", "acczone", "acc_pid_1")
+def test_undocumented_provider_never_builds_a_purchase_request(multi_store, monkeypatch):
+    # A provider in the registry but without a client module still cannot
+    # reach the network: there is no documented request to build.
+    monkeypatch.setattr(providers, "PROVIDERS", {"canboso", "ghost"})
+    supplier_product(multi_store, "ghost-item", "ghost", "ghost_pid")
     multi_store.supplier.configure(SupplierSettings(
-        provider="acczone", enabled=True, api_key="TEST_ONLY_ACCZONE_KEY",
+        provider="ghost", enabled=True, api_key="TEST_ONLY_GHOST_KEY",
         allow_purchases=True, resale_authorized=True, acknowledge_price_race=True,
         budget_currency="USD", spend_budget="100",
     ))
-    multi_store.supplier.cache_snapshot("acczone", catalog("acc_pid_1"), wallet())
+    multi_store.supplier.cache_snapshot("ghost", catalog("ghost_pid"), wallet())
     multi_store.accept_terms(101, "terms-v1")
-    # Preflight passes on the cached snapshot, but there is no documented
-    # request to build: the order rolls back instead of guessing an API call.
     with pytest.raises(ShopError, match="no documented buyer API client"):
-        multi_store.create_order(101, "acc-item", "terms-v1")
+        multi_store.create_order(101, "ghost-item", "terms-v1")
     assert multi_store.user_orders(101) == []
     with multi_store.connection() as db:
         assert db.execute("SELECT count(*) FROM supplier_intents").fetchone()[0] == 0
@@ -338,6 +349,105 @@ def test_cli_preview_skips_a_provider_with_a_rotated_key(multi_store, capsys):
     snapshots = cached_products_snapshots(multi_store, settings, 600)
     assert set(snapshots) == {"canboso"}
     assert "Jaha Digital" in capsys.readouterr().err
+
+
+def _insert_uncertain_intent(store, order_id, provider, product_id, *, first_sent=None):
+    now = store.clock()
+    key_hash = store.supplier.settings_for(provider).key_fingerprint
+    body = store.supplier.encrypt({"product_id": product_id, "quantity": 1})
+    with store.transaction() as db:
+        db.execute("INSERT INTO orders(id,user_id,sku,title,price_stars,terms_version,state,"
+                   "created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (order_id, 101, f"{provider}-sku", f"Multi {provider}", 400, "terms-v1",
+                    "paid", now, now, now + 900))
+        db.execute("INSERT INTO supplier_intents(order_id,idempotency_key,request_ciphertext,"
+                   "key_hash,provider,product_id,product_type,max_cost,currency,state,"
+                   "attempts,first_sent_at,budget_held,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (order_id, f"ds-{order_id}", body, key_hash, provider, product_id,
+                    "account", "10", "USD", "uncertain", 1,
+                    first_sent if first_sent is not None else now, 1, now, now))
+
+
+def test_acczone_never_allows_an_operator_resend(multi_store):
+    from shop.errors import ShopError as SE
+    multi_store.upsert_product({
+        "sku": "acczone-sku", "title": "Acc", "description": "x", "category": "Keys",
+        "price_stars": 400, "source": "supplier", "active": True, "is_demo": False,
+        "supplier": {"provider": "acczone", "product_id": "gemini",
+                     "product_type": "account", "currency": "USD", "max_cost": "10"},
+    })
+    _insert_uncertain_intent(multi_store, "acc-uncertain-1", "acczone", "gemini")
+    with pytest.raises(SE, match="no purchase idempotency"):
+        multi_store.supplier.resolve("acc-uncertain-1", "retry_same_request",
+                                     "operator checked the supplier dashboard", "admin-1")
+    # Stopping for refund stays available.
+    multi_store.supplier.resolve("acc-uncertain-1", "stop_for_refund",
+                                 "operator checked the supplier dashboard", "admin-1")
+    with multi_store.connection() as db:
+        state = db.execute("SELECT state FROM supplier_intents WHERE order_id='acc-uncertain-1'").fetchone()[0]
+    assert state == "resolved_for_refund"
+
+
+def test_worker_recovers_uncertain_intent_via_provider_lookup(multi_store):
+    from decimal import Decimal as D
+
+    from shop.canboso import PurchaseResult as PR
+    multi_store.upsert_product({
+        "sku": "jaha_digital-sku", "title": "Jaha", "description": "x", "category": "Keys",
+        "price_stars": 400, "source": "supplier", "active": True, "is_demo": False,
+        "supplier": {"provider": "jaha_digital", "product_id": "jaha_pid_1",
+                     "product_type": "account", "currency": "USD", "max_cost": "10"},
+    })
+    _insert_uncertain_intent(multi_store, "jaha-uncertain-1", "jaha_digital", "jaha_pid_1")
+
+    class RecoveryClient:
+        def __init__(self):
+            self.seen = []
+
+        async def recover_uncertain(self, intent):
+            self.seen.append(intent["order_id"])
+            return PR("JD-1001", "completed", D("8.5"), "USD", "DELIVERED-CODE",
+                      {"order": {"order_number": "JD-1001"}}, product_type="account")
+
+    client = RecoveryClient()
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    delivery = DeliveryWorker(multi_store, bot, frozenset({999}))
+    worker = SupplierWorker(multi_store, {"jaha_digital": client}, delivery)
+    asyncio.run(worker.recover_uncertain())
+    assert client.seen == ["jaha-uncertain-1"]
+    with multi_store.connection() as db:
+        intent = db.execute("SELECT * FROM supplier_intents WHERE order_id='jaha-uncertain-1'").fetchone()
+        stock = db.execute("SELECT * FROM stock WHERE order_id='jaha-uncertain-1'").fetchone()
+    assert intent["state"] == "completed"
+    assert intent["supplier_reference"] == "JD-1001"
+    assert intent["hold_reason"] == "recovered_via_supplier_lookup"
+    assert stock is not None  # Delivery was allocated from the recovered payload
+    # A throttled second pass does not hammer the provider.
+    asyncio.run(worker.recover_uncertain())
+    assert client.seen == ["jaha-uncertain-1"]
+
+
+def test_worker_recovery_keeps_silence_uncertain(multi_store):
+    multi_store.upsert_product({
+        "sku": "acczone-sku", "title": "Acc", "description": "x", "category": "Keys",
+        "price_stars": 400, "source": "supplier", "active": True, "is_demo": False,
+        "supplier": {"provider": "acczone", "product_id": "gemini",
+                     "product_type": "account", "currency": "USD", "max_cost": "10"},
+    })
+    _insert_uncertain_intent(multi_store, "acc-uncertain-2", "acczone", "gemini")
+
+    class SilentClient:
+        async def recover_uncertain(self, intent):
+            return None  # No matching history record: no evidence, no resolution.
+
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    delivery = DeliveryWorker(multi_store, bot, frozenset({999}))
+    worker = SupplierWorker(multi_store, {"acczone": SilentClient()}, delivery)
+    asyncio.run(worker.recover_uncertain())
+    with multi_store.connection() as db:
+        state = db.execute("SELECT state FROM supplier_intents WHERE order_id='acc-uncertain-2'").fetchone()[0]
+    assert state == "uncertain"
 
 
 def test_pricing_uses_the_mappings_own_provider_snapshot(multi_store):

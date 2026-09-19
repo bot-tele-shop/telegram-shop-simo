@@ -86,8 +86,11 @@ def validate_mapping_spec(specification: dict) -> None:
         raise ShopError("Do not send slot_months for catalog slots or account products")
 
 
-def build_purchase_body(settings: CanbosoSettings, spec: dict, email: str | None) -> dict:
-    """The exact purchase body persisted with an intent; never rebuilt later."""
+def build_purchase_body(settings: CanbosoSettings, spec: dict, email: str | None,
+                        *, order_id: str = "") -> dict:
+    """The exact purchase body persisted with an intent; never rebuilt later.
+    Canboso has no external-order-id field, so order_id is accepted for the
+    shared hook signature and ignored."""
     body = {"key": settings.api_key, "product_id": spec["product_id"], "quantity": 1}
     if spec["product_type"] == "slot":
         try:
@@ -470,3 +473,8 @@ def parse_purchase(body: dict, request: dict) -> PurchaseResult:
         raise CanbosoError("delivery_too_large")
     return PurchaseResult(reference, state, amount, currency, payload, body,
                           product_type=str(order.get("productType") or ""))
+
+
+# Shared provider-module interface (see shop/providers.py): every documented
+# provider exposes Client and HttpTransport with the same constructor shape.
+Client = CanbosoClient

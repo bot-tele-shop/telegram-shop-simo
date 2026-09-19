@@ -561,10 +561,10 @@ def test_run_lifecycle_closes_workers_session_and_dispatcher(
     monkeypatch.setattr(cli.aiohttp, "ClientSession", session_factory)
     transport = Mock()
     transport_factory = Mock(return_value=transport)
-    monkeypatch.setattr(cli, "HttpTransport", transport_factory)
     client = Mock()
     client_factory = Mock(return_value=client)
-    monkeypatch.setattr(cli, "CanbosoClient", client_factory)
+    module = SimpleNamespace(Client=client_factory, HttpTransport=transport_factory)
+    monkeypatch.setattr(cli.providers, "client_module", lambda name: module)
     if enabled and outcome == "setup_error":
         supplier_factory.side_effect = RuntimeError("setup failed")
 

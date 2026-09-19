@@ -13,7 +13,7 @@ from test_supplier_store import (
 )
 from test_supplier_store import supplier_shop as supplier_shop
 
-from shop.canboso import BALANCE_PATH, PRODUCTS_PATH, PURCHASE_PATH, Reply
+from shop.canboso import BALANCE_PATH, PRODUCTS_PATH, PURCHASE_PATH, PurchaseResult, Reply, money
 from shop.store import ShopError
 
 
@@ -213,6 +213,26 @@ def test_uncertain_purchase_is_held_across_ticks_and_restart(supplier_shop, fail
     assert len(h.transport.posts) == 1
     assert h.intent(order)["attempts"] == 1
     assert h.store.get_order(order["id"])["state"] == "paid"
+
+
+def test_held_recovery_reports_hold_and_backs_off(supplier_shop):
+    h = supplier_shop
+    order = h.paid_order()
+    h.transport.outcomes.append(TimeoutError("TEST_ONLY_PRIVATE_TRANSPORT_DETAIL"))
+    asyncio.run(h.worker.tick())
+    assert h.intent(order)["state"] == "uncertain"
+    # A lookup result priced above the cap must be held for an operator, and
+    # a held intent must back off instead of re-recovering every pass.
+    over_cap = money(h.intent(order)["max_cost"]) + money("1")
+    result = PurchaseResult("offline-reference-account", "completed", over_cap, "USD",
+                            "CODE-XYZ", {"order": {"orderCode": "offline-reference-account"}},
+                            product_type="account")
+    hold = h.store.supplier.complete_recovered(order["id"], result)
+    assert hold == "supplier_price_or_currency_changed"
+    row = h.intent(order)
+    assert row["state"] == "uncertain" and row["hold_reason"] == hold
+    assert row["next_attempt_at"] > h.clock[0]
+    assert_no_delivery(h, order)
 
 
 def test_cancelled_inflight_post_recovers_as_uncertain_without_replay(supplier_shop):

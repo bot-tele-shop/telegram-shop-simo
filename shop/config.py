@@ -51,7 +51,8 @@ class SupplierSettings:
             if not self.resale_authorized:
                 issues.append("Confirm you are authorized to resell the selected supplier products")
             if not self.acknowledge_price_race:
-                issues.append(f"Acknowledge that {display} has no server-side maximum-price parameter")
+                issues.append(f"Acknowledge that {display} prices can change between "
+                              "catalog sync and fulfillment; the preflight max_cost cap applies")
             if self.budget_currency not in {"VND", "USD"}:
                 issues.append("Set budget_currency to the currency reported by your supplier wallet")
             try:
