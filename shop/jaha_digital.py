@@ -261,7 +261,7 @@ class JahaClient:
             "name": name,
             "productType": product_type,
             # USDT is USD-pegged; normalized at this boundary.
-            "price": {"amount": amount, "currency": "USD", "text": f"USDT {amount}"},
+            "price": {"amount": str(amount), "currency": "USD", "text": f"USDT {amount}"},
             "availability": {"available": available if status == "available" else 0, "sold": 0},
             "promotions": [],
             "purchaseRequirements": requirements,
@@ -278,7 +278,7 @@ class JahaClient:
         if account.get("currency") != "USDT":
             raise CanbosoError("unsupported_wallet_currency")
         amount = money(account.get("balance_usdt"))
-        return {"balance": amount, "walletCurrency": "USD",
+        return {"balance": str(amount), "walletCurrency": "USD",
                 "balanceText": f"USDT {amount}",
                 "accountStatus": text(account.get("status"), "invalid_account_status")}
 
