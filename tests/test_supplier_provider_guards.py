@@ -10,7 +10,13 @@ from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
-from test_new_supplier_clients import FakeTransport, jaha_order, jaha_product, settings_for
+from test_new_supplier_clients import (
+    EMAIL_INPUT,
+    FakeTransport,
+    jaha_order,
+    jaha_product,
+    settings_for,
+)
 from test_providers import multi_store as multi_store
 
 from shop import acczone, elite_emporium, jaha_digital
@@ -135,3 +141,58 @@ def test_worker_purchases_through_a_non_canboso_provider_exactly_once(multi_stor
     # Nothing left to claim: a completed purchase is never replayed.
     assert asyncio.run(worker.purchase_one()) is False
     assert len([c for c in transport.calls if c["method"] == "POST"]) == 1
+
+
+def _insert_uncertain_intent(store, order_id, provider, product_id, product_type):
+    now = store.clock()
+    key_hash = store.supplier.settings_for(provider).key_fingerprint
+    with store.transaction() as db:
+        db.execute("INSERT INTO orders(id,user_id,sku,title,price_stars,terms_version,state,"
+                   "created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (order_id, 101, f"{provider}-sku", f"Multi {provider}", 400, "terms-v1",
+                    "paid", now, now, now + 900))
+        db.execute("INSERT INTO supplier_intents(order_id,idempotency_key,request_ciphertext,"
+                   "key_hash,provider,product_id,product_type,max_cost,currency,state,"
+                   "attempts,first_sent_at,budget_held,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (order_id, f"ds-{order_id}", store.supplier.encrypt({"quantity": 1}),
+                    key_hash, provider, product_id, product_type, "10", "USD", "uncertain",
+                    1, now, 1, now, now))
+
+
+def test_slot_recovery_after_restart_does_not_false_hold(multi_store):
+    """A restart leaves the client's catalog cache cold; recovery must sync
+    first and must never report a guessed product_type as a mismatch."""
+    multi_store.upsert_product({
+        "sku": "jaha_digital-sku", "title": "Jaha slot", "description": "x",
+        "category": "Keys", "price_stars": 400, "source": "supplier", "active": True,
+        "is_demo": False,
+        "supplier": {"provider": "jaha_digital", "product_id": "jaha_slot_1",
+                     "product_type": "slot", "currency": "USD", "max_cost": "10"},
+    })
+    _insert_uncertain_intent(multi_store, "slot-order-1", "jaha_digital",
+                             "jaha_slot_1", "slot")
+    settings = replace(settings_for("jaha_digital"), api_key="TEST_ONLY_JAHA_KEY")
+    transport = FakeTransport(
+        Reply(200, {"products": [jaha_product("jaha_slot_1", buyer_input=EMAIL_INPUT)],
+                    "next_cursor": None}),
+        Reply(200, {"account": {
+            "client_id": "c1", "balance_usdt": "100.0000", "currency": "USDT",
+            "status": "active", "language": "en", "terms_version": "v1",
+            "purchase_amount_limit_usdt": None, "daily_turnover_limit_usdt": None}}),
+        Reply(200, {"orders": [{"order_number": "JD-7001", "status": "completed",
+                                "external_order_id": "ds-slot-order-1"}],
+                    "next_cursor": None}),
+        Reply(200, jaha_order("JD-7001", code="jaha_slot_1", external="ds-slot-order-1")),
+    )
+    client = jaha_digital.JahaClient(settings, transport, "production")
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    delivery = DeliveryWorker(multi_store, bot, frozenset({999}))
+    worker = SupplierWorker(multi_store, {"jaha_digital": client}, delivery)
+    asyncio.run(worker.tick())  # Cold start: cache is empty until this sync.
+    with multi_store.connection() as db:
+        intent = db.execute("SELECT * FROM supplier_intents WHERE order_id='slot-order-1'").fetchone()
+        stock = db.execute("SELECT * FROM stock WHERE order_id='slot-order-1'").fetchone()
+    assert intent["state"] == "completed"
+    assert intent["hold_reason"] == "recovered_via_supplier_lookup"
+    assert stock is not None

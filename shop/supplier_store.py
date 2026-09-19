@@ -423,7 +423,9 @@ class SupplierState:
             if result.currency != row["currency"] or result.amount > money(row["max_cost"]):
                 hold = "supplier_price_or_currency_changed"
             result_type = result.product_type or (result.raw.get("order", {}) or {}).get("productType")
-            if result_type != row["product_type"]:
+            # A provider that cannot prove the type (cold catalog cache) must
+            # not trip the hold: only a known mismatch is evidence.
+            if result_type and result_type != row["product_type"]:
                 hold = "supplier_product_type_mismatch"
             if row["order_state"] != "paid":
                 hold = "customer_payment_no_longer_payable"

@@ -392,12 +392,13 @@ class JahaClient:
         if len(payload.encode()) > 1_000_000:
             raise CanbosoError("delivery_too_large")
         # Slot (email-collection) products must keep their type so finish()
-        # and recovery holds compare like with like; default only when the
-        # catalog has not been synced yet.
+        # and recovery holds compare like with like. On a cold cache (process
+        # restarted before the first sync) report unknown instead of guessing:
+        # the store only holds on a known mismatch, never on missing data.
         known = self._products.get(str(order.get("product_code")), {})
         product_type = known.get("productType")
         if product_type not in ("account", "slot"):
-            product_type = "account"
+            product_type = None
         return PurchaseResult(reference, state, amount, "USD", payload, body,
                               product_type=product_type)
 

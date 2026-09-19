@@ -202,10 +202,12 @@ class SupplierWorker:
     async def tick(self) -> None:
         await asyncio.to_thread(self.store.expire_orders)
         await asyncio.to_thread(self.store.supplier.recover_interrupted)
-        await self.recover_uncertain()
         ready = True
         if self.store.clock() - self.last_sync >= 45:
             ready = await self.synchronize()
+        # Recovery runs after sync: providers parse looked-up orders against
+        # their in-memory catalog cache, which a restart leaves cold.
+        await self.recover_uncertain()
         if ready and self.store.supplier.purchases_allowed():
             await self.purchase_one()
         await self.notify_reviews()
