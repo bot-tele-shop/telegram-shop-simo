@@ -22,7 +22,7 @@ from cryptography.fernet import Fernet
 
 from . import providers
 from .bot import build_dispatcher
-from .canboso import CanbosoClient, CanbosoError, HttpTransport
+from .canboso import CanbosoError
 from .config import PROJECT_ROOT, CanbosoSettings, initialize_config, load_settings
 from .delivery import DeliveryWorker
 from .polling import DurablePolling
@@ -97,20 +97,23 @@ async def run_bot(settings, store: Store) -> None:
             supplier_settings = settings.all_supplier_settings()
             if any(s.enabled for s in supplier_settings.values()):
                 clients = {}
-                if supplier_settings["canboso"].enabled:
-                    supplier_session = await resources.enter_async_context(
-                        aiohttp.ClientSession(trust_env=False)
-                    )
-                    transport = HttpTransport(supplier_session)
-                    clients["canboso"] = CanbosoClient(
-                        supplier_settings["canboso"], transport, settings.environment
-                    )
+                supplier_session = await resources.enter_async_context(
+                    aiohttp.ClientSession(trust_env=False)
+                )
                 for name, provider_settings in supplier_settings.items():
-                    if name != "canboso" and provider_settings.enabled:
+                    if not provider_settings.enabled:
+                        continue
+                    module = providers.client_module(name)
+                    if module is None:
                         log.warning(
                             "%s is enabled but has no documented buyer API client yet; "
                             "its products stay unsellable until one is integrated", name,
                         )
+                        continue
+                    clients[name] = module.Client(
+                        provider_settings, module.HttpTransport(supplier_session),
+                        settings.environment,
+                    )
                 supplier = SupplierWorker(store, clients, worker,
                                           pricer=Pricer(store, settings.stars_fx),
                                           router=Router(store, settings.stars_fx))
@@ -198,16 +201,19 @@ def private_json(path: Path, result: dict) -> None:
 
 
 async def sync_supplier(settings, store: Store, provider: str = "canboso") -> dict:
-    if provider != "canboso":
+    module = providers.client_module(provider)
+    if module is None:
         raise ShopError(
             f"{providers.display(provider)} has no documented buyer API client yet; "
-            "only read-only Canboso sync is available"
+            "read-only sync is unavailable"
         )
     if store.supplier.cooldown_until(provider) > store.clock():
         raise ShopError("Supplier cooldown active; wait before synchronizing again")
+    provider_settings = settings.all_supplier_settings()[provider]
     try:
         async with aiohttp.ClientSession(trust_env=False) as session:
-            client = CanbosoClient(settings.canboso, HttpTransport(session), settings.environment)
+            client = module.Client(provider_settings, module.HttpTransport(session),
+                                   settings.environment)
             products, balance = await client.products(), await client.balance()
             await asyncio.to_thread(store.supplier.cache_snapshot, provider, products, balance)
             return {"products": products["products"], "walletCurrency": balance["walletCurrency"],

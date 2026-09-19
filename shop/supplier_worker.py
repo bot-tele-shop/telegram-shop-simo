@@ -25,6 +25,8 @@ class SupplierWorker:
         self.last_sync = float("-inf")
         self.last_review = float("-inf")
         self.reviewed: set[tuple] = set()
+        # Per-intent throttle for read-only uncertain-order recovery lookups.
+        self._recovery_attempts: dict[tuple, float] = {}
         # Set by kick() when a supplier payment lands; the 5s sweep remains as
         # the retry/recovery safety net.
         self.wake = asyncio.Event()
@@ -152,9 +154,49 @@ class SupplierWorker:
         self.reviewed = current
         self.last_review = self.store.clock()
 
+    async def recover_uncertain(self) -> None:
+        """Read-only recovery of uncertain intents through each provider's
+        documented order-lookup or history endpoint. Nothing is re-sent; an
+        intent only resolves on positive supplier-side evidence."""
+        intents = await asyncio.to_thread(self.store.supplier.uncertain_intents)
+        now = self.store.clock()
+        for intent in intents:
+            provider = intent["provider"]
+            client = self.clients.get(provider)
+            recover = getattr(client, "recover_uncertain", None)
+            if recover is None:
+                continue
+            key = (provider, intent["order_id"], intent["resolution_version"])
+            if now - self._recovery_attempts.get(key, float("-inf")) < 300:
+                continue
+            if await asyncio.to_thread(self.store.supplier.cooldown_until, provider) > now:
+                continue
+            self._recovery_attempts[key] = now
+            try:
+                result = await recover(intent)
+            except PurchaseRejected as exc:
+                # The supplier confirmed the order was never fulfilled.
+                await asyncio.to_thread(
+                    self.store.supplier.fail, intent["order_id"], exc.code, rejected=True)
+            except CanbosoError as exc:
+                await asyncio.to_thread(
+                    self.store.supplier.defer_network, exc.retry_after or 60, provider)
+            except Exception:
+                log.error("Supplier recovery failed (%s)", type(sys.exc_info()[1]).__name__)
+            else:
+                if result is not None:
+                    await asyncio.to_thread(
+                        self.store.supplier.complete_recovered, intent["order_id"], result)
+                    await self.delivery.notify_admins(
+                        f"Supplier order {intent['order_id']} recovered via "
+                        f"{provider} order lookup ({result.status})."
+                    )
+                    self.last_sync = float("-inf")  # Refresh wallet/availability.
+
     async def tick(self) -> None:
         await asyncio.to_thread(self.store.expire_orders)
         await asyncio.to_thread(self.store.supplier.recover_interrupted)
+        await self.recover_uncertain()
         ready = True
         if self.store.clock() - self.last_sync >= 45:
             ready = await self.synchronize()
