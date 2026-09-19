@@ -137,7 +137,7 @@ def test_sync_uses_one_session_transport_and_get_only(cli_env, supplier_http):
     assert network.calls[0][0].session is network.session
     with store.connection() as db:
         rows = db.execute("SELECT * FROM supplier_cache ORDER BY name").fetchall()
-    assert [row["name"] for row in rows] == ["balance", "products"]
+    assert [row["name"] for row in rows] == ["canboso:balance", "canboso:products"]
     for row, expected in zip(rows, (network.balance, network.products)):
         assert row["key_hash"] == cli_env.settings.canboso.key_fingerprint
         assert store.supplier.decrypt(row["ciphertext"]) == expected
@@ -356,8 +356,10 @@ def test_review_recovers_interrupted_purchase_and_prints_only_safe_states(
     assert rows[0]["state"] == "uncertain"
     assert rows[0]["hold_reason"] == "process_interrupted"
     assert set(rows[0]) == {
-        "order_id", "state", "supplier_reference", "hold_reason", "resolution_version", "user_id",
+        "order_id", "provider", "state", "supplier_reference", "hold_reason",
+        "resolution_version", "user_id",
     }
+    assert rows[0]["provider"] == "canboso"
     assert EMAIL not in text and BUYER_KEY not in text
     assert shop.intent(order)["state"] == "uncertain"
     cli_env.session_factory.assert_not_called()
@@ -603,7 +605,7 @@ def test_run_lifecycle_closes_workers_session_and_dispatcher(
         session_factory.assert_called_once_with(trust_env=False)
         transport_factory.assert_called_once_with(session)
         client_factory.assert_called_once_with(settings.canboso, transport, settings.environment)
-        assert supplier_factory.call_args.args == (store, client, delivery)
+        assert supplier_factory.call_args.args == (store, {"canboso": client}, delivery)
         assert isinstance(supplier_factory.call_args.kwargs["pricer"], Pricer)
         session.__aexit__.assert_awaited_once()
         if outcome == "setup_error":

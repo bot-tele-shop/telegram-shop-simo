@@ -18,6 +18,7 @@ from typing import Any, Protocol
 import aiohttp
 
 from .config import CanbosoSettings
+from .errors import ShopError
 
 BASE_URL = "https://canboso.com"
 PRODUCTS_PATH = "/api/v2/telegram-buyer/products"
@@ -71,6 +72,33 @@ class PurchaseResult:
     currency: str
     payload: str = field(repr=False)
     raw: dict[str, Any] = field(repr=False)
+    product_type: str = ""  # Normalized; supplier_store re-checks it against the intent
+
+
+def validate_mapping_spec(specification: dict) -> None:
+    """Canboso-specific mapping rules, called by shop.providers.validate_spec."""
+    months = specification.get("slot_months")
+    if specification.get("product_id") == "slot_chatgpt_business":
+        if (specification.get("product_type") != "slot" or type(months) is not int
+                or months not in {1, 3, 6, 12}):
+            raise ShopError("Business slots need a fixed slot_months variant: 1, 3, 6 or 12")
+    elif months is not None:
+        raise ShopError("Do not send slot_months for catalog slots or account products")
+
+
+def build_purchase_body(settings: CanbosoSettings, spec: dict, email: str | None) -> dict:
+    """The exact purchase body persisted with an intent; never rebuilt later."""
+    body = {"key": settings.api_key, "product_id": spec["product_id"], "quantity": 1}
+    if spec["product_type"] == "slot":
+        try:
+            body["customer_email"] = valid_email(email)
+        except CanbosoError as exc:
+            raise ShopError("Enter a valid customer email for this slot") from exc
+        if "slot_months" in spec:
+            body["slot_months"] = spec["slot_months"]
+    elif email:
+        raise ShopError("Email is not required for this product")
+    return body
 
 
 class Transport(Protocol):
@@ -440,4 +468,5 @@ def parse_purchase(body: dict, request: dict) -> PurchaseResult:
         raise CanbosoError("unsupported_or_unconfirmed_delivery_type")
     if len(payload.encode()) > 1_000_000:
         raise CanbosoError("delivery_too_large")
-    return PurchaseResult(reference, state, amount, currency, payload, body)
+    return PurchaseResult(reference, state, amount, currency, payload, body,
+                          product_type=str(order.get("productType") or ""))

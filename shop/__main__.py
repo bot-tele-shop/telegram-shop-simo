@@ -20,6 +20,7 @@ from aiogram.client.telegram import PRODUCTION, TEST
 from aiogram.types import BotCommand
 from cryptography.fernet import Fernet
 
+from . import providers
 from .bot import build_dispatcher
 from .canboso import CanbosoClient, CanbosoError, HttpTransport
 from .config import PROJECT_ROOT, CanbosoSettings, initialize_config, load_settings
@@ -29,6 +30,8 @@ from .pricing import Pricer
 from .router import Router
 from .store import ShopError, Store
 from .supplier_worker import SupplierWorker
+
+log = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -91,13 +94,24 @@ async def run_bot(settings, store: Store) -> None:
         async with AsyncExitStack() as resources:
             resources.push_async_callback(dispatcher.storage.close)
             supplier = None
-            if settings.canboso.enabled:
-                supplier_session = await resources.enter_async_context(
-                    aiohttp.ClientSession(trust_env=False)
-                )
-                transport = HttpTransport(supplier_session)
-                client = CanbosoClient(settings.canboso, transport, settings.environment)
-                supplier = SupplierWorker(store, client, worker,
+            supplier_settings = settings.all_supplier_settings()
+            if any(s.enabled for s in supplier_settings.values()):
+                clients = {}
+                if supplier_settings["canboso"].enabled:
+                    supplier_session = await resources.enter_async_context(
+                        aiohttp.ClientSession(trust_env=False)
+                    )
+                    transport = HttpTransport(supplier_session)
+                    clients["canboso"] = CanbosoClient(
+                        supplier_settings["canboso"], transport, settings.environment
+                    )
+                for name, provider_settings in supplier_settings.items():
+                    if name != "canboso" and provider_settings.enabled:
+                        log.warning(
+                            "%s is enabled but has no documented buyer API client yet; "
+                            "its products stay unsellable until one is integrated", name,
+                        )
+                supplier = SupplierWorker(store, clients, worker,
                                           pricer=Pricer(store, settings.stars_fx),
                                           router=Router(store, settings.stars_fx))
                 worker.also_wake.append(supplier.kick)
@@ -183,18 +197,23 @@ def private_json(path: Path, result: dict) -> None:
         stream.write("\n")
 
 
-async def sync_supplier(settings, store: Store) -> dict:
-    if store.supplier.cooldown_until() > store.clock():
+async def sync_supplier(settings, store: Store, provider: str = "canboso") -> dict:
+    if provider != "canboso":
+        raise ShopError(
+            f"{providers.display(provider)} has no documented buyer API client yet; "
+            "only read-only Canboso sync is available"
+        )
+    if store.supplier.cooldown_until(provider) > store.clock():
         raise ShopError("Supplier cooldown active; wait before synchronizing again")
     try:
         async with aiohttp.ClientSession(trust_env=False) as session:
             client = CanbosoClient(settings.canboso, HttpTransport(session), settings.environment)
             products, balance = await client.products(), await client.balance()
-            await asyncio.to_thread(store.supplier.cache_snapshot, products, balance)
+            await asyncio.to_thread(store.supplier.cache_snapshot, provider, products, balance)
             return {"products": products["products"], "walletCurrency": balance["walletCurrency"],
                     "balance": balance["balance"], "mode": "read-only; no purchases"}
     except CanbosoError as exc:
-        store.supplier.defer_network(exc.retry_after or 60)
+        store.supplier.defer_network(exc.retry_after or 60, provider)
         raise ShopError(exc.code) from None
 
 
@@ -211,16 +230,31 @@ def read_private_text(path: Path, limit: int, label: str) -> str:
         raise ShopError(f"{label} file must contain UTF-8 text") from None
 
 
-def cached_products_snapshot(store, settings, max_age: int) -> dict:
-    """Decrypted supplier products cache for CLI dry runs; no network."""
-    with store.connection() as db:
-        row = db.execute("SELECT * FROM supplier_cache WHERE name='products'").fetchone()
-    if not row or row["key_hash"] != settings.canboso.key_fingerprint:
+def cached_products_snapshots(store, settings, max_age: int) -> dict[str, dict]:
+    """Decrypted per-provider product caches for CLI dry runs; no network."""
+    snapshots = {}
+    for name, supplier in settings.all_supplier_settings().items():
+        if not supplier.enabled:
+            continue
+        try:
+            snapshot, age, key_hash = store.supplier.cached_products(name)
+        except ShopError:
+            continue  # Never synced; routing/pricing simply skip this provider.
+        if key_hash != supplier.key_fingerprint:
+            # A rotated key on one provider must not kill the whole preview;
+            # routing/pricing simply skip it like a never-synced provider.
+            print(f"warning: no supplier snapshot cached for this {providers.display(name)} "
+                  "buyer key; skipping (run supplier-sync first)", file=sys.stderr)
+            continue
+        if age > max_age:
+            raise ShopError(
+                f"Cached {providers.display(name)} snapshot is {int(age)}s old; "
+                "sync first or pass --max-age"
+            )
+        snapshots[name] = snapshot
+    if not snapshots:
         raise ShopError("No supplier snapshot cached for this buyer key; run supplier-sync first")
-    age = store.clock() - row["fetched_at"]
-    if age > max_age:
-        raise ShopError(f"Cached supplier snapshot is {int(age)}s old; sync first or pass --max-age")
-    return store.supplier.decrypt(row["ciphertext"])
+    return snapshots
 
 
 def main() -> int:
@@ -243,6 +277,8 @@ def main() -> int:
         "supplier-sync",
         help="Export supplier products/balance using GET only; stop the bot first to share its quota",
     )
+    sync.add_argument("--provider", default="canboso",
+                      help="Registered supplier provider to sync (default: canboso)")
     sync.add_argument("--output", type=Path, required=True, help="New local JSON file (no overwrite)")
     sub.add_parser("supplier-review", help="Recover interrupted purchases and list safe local states")
     inspect = sub.add_parser("supplier-inspect", help="Export sensitive supplier evidence locally only")
@@ -331,6 +367,7 @@ def main() -> int:
                 )
                 store.initialize()
                 store.supplier.configure(settings.canboso)
+                store.supplier.configure_many(settings.other_suppliers.values())
                 print("Database environment and encryption key: OK")
             for issue in issues:
                 print(f"NEEDS SETUP: {issue}")
@@ -341,12 +378,21 @@ def main() -> int:
                 f"resale_authorized={settings.canboso.resale_authorized}; "
                 f"acknowledge_price_race={settings.canboso.acknowledge_price_race}"
             )
+            for name, supplier in settings.all_supplier_settings().items():
+                if name == "canboso":
+                    continue
+                client_state = "documented client" if providers.entry(name).documented else "no documented buyer API client yet"
+                print(
+                    f"Supplier {providers.display(name)}: enabled={supplier.enabled}; "
+                    f"allow_purchases={supplier.allow_purchases} ({client_state})"
+                )
             print("Local checks only; no live verification of Telegram or supplier connectivity.")
             return 1 if issues else 0
         settings.validate(require_bot=args.command == "run")
         store = Store(settings.database_path, settings.stock_encryption_key, settings.environment)
         store.initialize()
         store.supplier.configure(settings.canboso)
+        store.supplier.configure_many(settings.other_suppliers.values())
         if args.command == "seed-demo":
             if settings.environment != "test":
                 raise ShopError("Sample catalog is only allowed in the test environment")
@@ -380,14 +426,16 @@ def main() -> int:
             added, skipped = store.import_stock(args.sku, payloads)
             print(f"Imported {added} unique inventory items; skipped {skipped} duplicates.")
         elif args.command == "supplier-sync":
-            if not settings.canboso.enabled:
+            if not providers.registered(args.provider):
+                raise ShopError(f"Unknown supplier provider {args.provider!r}")
+            if not settings.all_supplier_settings()[args.provider].enabled:
                 raise ShopError("Supplier integration is disabled")
             if not args.output.parent.is_dir():
                 raise ShopError("Output parent directory must exist")
             if args.output.exists() or args.output.is_symlink():
                 raise ShopError("Output file already exists; choose a new local JSON path")
             with process_lock(settings.database_path.with_suffix(".process.lock")):
-                private_json(args.output, asyncio.run(sync_supplier(settings, store)))
+                private_json(args.output, asyncio.run(sync_supplier(settings, store, args.provider)))
             print("Read-only supplier products/balance exported locally. No purchases were made.")
         elif args.command == "supplier-review":
             store.supplier.recover_interrupted()
@@ -430,8 +478,8 @@ def main() -> int:
                 )
                 print(f"Pricing rule saved for {args.sku} ({args.mode}).")
             elif args.pricing_command == "preview":
-                snapshot = cached_products_snapshot(store, settings, args.max_age)
-                changes = pricer.reprice(snapshot, dry_run=True)
+                snapshots = cached_products_snapshots(store, settings, args.max_age)
+                changes = pricer.reprice(snapshots, dry_run=True)
                 if not changes:
                     print("No price changes would be applied.")
                 for c in changes:
@@ -469,8 +517,8 @@ def main() -> int:
                     print(f"{r['sku']}: {r['provider']}:{r['product_id']} "
                           f"({r['product_type']}, {r['currency']}, cap {r['max_cost']}) [{state}]")
             elif args.route_command == "preview":
-                snapshot = cached_products_snapshot(store, settings, args.max_age)
-                decisions = router.route({"canboso": snapshot}, dry_run=True)
+                snapshots = cached_products_snapshots(store, settings, args.max_age)
+                decisions = router.route(snapshots, dry_run=True)
                 if not decisions:
                     print("No routing candidates to evaluate.")
                 for d in decisions:

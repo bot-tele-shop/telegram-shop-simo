@@ -25,6 +25,7 @@ from .errors import ShopError
 from .pricing import PRICING_SCHEMA
 from .router import ROUTER_SCHEMA
 from .supplier_store import SUPPLIER_SCHEMA, SupplierState
+from .supplier_store import migrate as migrate_supplier_schema
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ class Store:
         with self.connection() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA + SUPPLIER_SCHEMA + PRICING_SCHEMA + ROUTER_SCHEMA)
+            migrate_supplier_schema(db)
         with self.transaction() as db:
             meta = {r["key"]: r["value"] for r in db.execute("SELECT * FROM metadata")}
             if meta and meta.get("schema") != "1":
@@ -389,7 +391,11 @@ class Store:
         if product is None or not product["active"]:
             raise ShopError("This product is not available")
         if product["source"] == "supplier":
-            self.supplier.assert_enabled()
+            try:
+                provider = self.supplier.mapping(product["sku"]).get("provider", "canboso")
+            except ShopError:
+                provider = "canboso"
+            self.supplier.assert_enabled(provider)
         if product["is_demo"] and self.environment != "test":
             raise ShopError("Demo products cannot be sold in production")
 

@@ -29,8 +29,9 @@ def assert_no_delivery(h, order):
 def test_synchronization_persists_validated_encrypted_snapshots_without_spending(supplier_shop):
     h = supplier_shop
     snapshots = {row["name"]: row for row in h.rows("supplier_cache")}
-    assert set(snapshots) == {"products", "balance"}
-    for name, expected in (("products", h.transport.catalog), ("balance", h.transport.wallet)):
+    assert set(snapshots) == {"canboso:products", "canboso:balance"}
+    for name, expected in (("canboso:products", h.transport.catalog),
+                           ("canboso:balance", h.transport.wallet)):
         row = snapshots[name]
         assert row["key_hash"] == h.settings.key_fingerprint
         assert row["fetched_at"] == h.clock[0]
