@@ -179,11 +179,20 @@ class EliteClient:
         self.check_enabled()
         products: list[dict] = []
         seen: set[str] = set()
-        reply = await self.transport.request("GET", PRODUCTS_PATH,
-                                             query={"per_page": 100}, headers=self._auth())
-        result = self.check_response(reply)
-        for raw_product in _product_list(result):
-            products.append(self._normalize_product(raw_product, seen))
+        for page in range(1, 21):  # Hard page cap; an endless catalog is a bug.
+            reply = await self.transport.request(
+                "GET", PRODUCTS_PATH,
+                query={"per_page": 100, "page": page}, headers=self._auth())
+            result = self.check_response(reply)
+            items = _product_list(result)
+            if not items:
+                break
+            for raw_product in items:
+                products.append(self._normalize_product(raw_product, seen))
+            if len(items) < 100:
+                break
+        # Cache the catalog so _parse_order can fall back to the synced price.
+        self._products = {p["productId"]: p for p in products}
         return {"products": products, "walletCurrency": "USD"}
 
     def _normalize_product(self, product: Any, seen: set[str]) -> dict:
@@ -310,7 +319,7 @@ class EliteClient:
         if amount is None:
             # The contract documents a wallet-debit purchase; fall back to the
             # catalog price from the last sync rather than trusting nothing.
-            product = self._products.get(str(requested))
+            product = self._products.get(str(requested if requested is not None else echoed))
             if not product:
                 raise CanbosoError("missing_purchase_amount")
             amount = product["price"]["amount"]

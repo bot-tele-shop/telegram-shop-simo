@@ -169,6 +169,8 @@ class SupplierWorker:
             key = (provider, intent["order_id"], intent["resolution_version"])
             if now - self._recovery_attempts.get(key, float("-inf")) < 300:
                 continue
+            if intent["next_attempt_at"] and intent["next_attempt_at"] > now:
+                continue  # Held or deferred intents re-check on their own clock.
             if await asyncio.to_thread(self.store.supplier.cooldown_until, provider) > now:
                 continue
             self._recovery_attempts[key] = now
@@ -185,12 +187,16 @@ class SupplierWorker:
                 log.error("Supplier recovery failed (%s)", type(sys.exc_info()[1]).__name__)
             else:
                 if result is not None:
-                    await asyncio.to_thread(
+                    hold = await asyncio.to_thread(
                         self.store.supplier.complete_recovered, intent["order_id"], result)
-                    await self.delivery.notify_admins(
-                        f"Supplier order {intent['order_id']} recovered via "
-                        f"{provider} order lookup ({result.status})."
-                    )
+                    if hold:
+                        log.info("Recovered supplier order %s held for operator (%s)",
+                                 intent["order_id"], hold)
+                    else:
+                        await self.delivery.notify_admins(
+                            f"Supplier order {intent['order_id']} recovered via "
+                            f"{provider} order lookup ({result.status})."
+                        )
                     self.last_sync = float("-inf")  # Refresh wallet/availability.
 
     async def tick(self) -> None:

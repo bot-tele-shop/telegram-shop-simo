@@ -213,6 +213,8 @@ class JahaClient:
                 raise CanbosoError("invalid_products_cursor")
         else:
             raise CanbosoError("supplier_catalog_pagination_loop")
+        # Cache the catalog so purchase guards (buyer-input, quantity) work.
+        self._products = {p["productId"]: p for p in products}
         return {"products": products, "walletCurrency": "USD"}
 
     def _normalize_product(self, product: Any, seen: set[str]) -> dict:
@@ -389,8 +391,15 @@ class JahaClient:
             raise CanbosoError("unconfirmed_supplier_order_status")
         if len(payload.encode()) > 1_000_000:
             raise CanbosoError("delivery_too_large")
+        # Slot (email-collection) products must keep their type so finish()
+        # and recovery holds compare like with like; default only when the
+        # catalog has not been synced yet.
+        known = self._products.get(str(order.get("product_code")), {})
+        product_type = known.get("productType")
+        if product_type not in ("account", "slot"):
+            product_type = "account"
         return PurchaseResult(reference, state, amount, "USD", payload, body,
-                              product_type="account")
+                              product_type=product_type)
 
     async def lookup_order(self, order_number: str) -> PurchaseResult | None:
         """Documented GET /v1/orders/{order_number}; None when it does not exist."""
@@ -402,9 +411,12 @@ class JahaClient:
         if reply.status == 404:
             return None
         result = self.check_response(reply)
-        request = {"product_code": result["order"].get("product_code"),
-                   "external_order_id": result["order"].get("external_order_id")}
         try:
+            order = result.get("order")
+            if not isinstance(order, dict):
+                return None  # Malformed body; keep the intent uncertain.
+            request = {"product_code": order.get("product_code"),
+                       "external_order_id": order.get("external_order_id")}
             return self._parse_order(result, request)
         except (CanbosoError, TypeError, KeyError, ValueError):
             return None  # Keep the intent uncertain for an operator.

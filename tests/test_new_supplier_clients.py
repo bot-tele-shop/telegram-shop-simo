@@ -157,6 +157,55 @@ def test_jaha_processing_order_is_pending_not_completed():
     assert result.payload == ""
 
 
+EMAIL_INPUT = {"required": True, "type": "email", "scope": "per_unit",
+               "prompt": "Enter email", "max_total_length": 400,
+               "fields": [{"name": "email", "type": "email", "required": True, "max_length": 320}]}
+
+
+def test_jaha_slot_purchase_sends_buyer_input_and_keeps_type():
+    order = jaha_order(code="jaha_002", external=None)
+    order["order"]["buyer_input_received"] = True
+    client, transport = jaha_client(
+        Reply(200, {"products": [jaha_product("jaha_002", buyer_input=EMAIL_INPUT)],
+                    "next_cursor": None}),
+        Reply(201, order))
+    run(client.products())  # Populates the cache the purchase guards rely on.
+    body = {"product_code": "jaha_002", "quantity": 1, "max_unit_price_usdt": "10",
+            "buyer_input": {"items": [{"email": "buyer@example.com"}]}}
+    result = run(client.purchase(body, IDEMPOTENCY))
+    assert transport.calls[1]["body"]["buyer_input"] == {"items": [{"email": "buyer@example.com"}]}
+    assert result.status == "completed"
+    assert result.product_type == "slot"
+
+
+def test_jaha_purchase_blocks_unsupported_buyer_input_products():
+    text_input = {"required": True, "type": "text", "scope": "per_order", "prompt": "x",
+                  "max_total_length": 100,
+                  "fields": [{"name": "text", "type": "text", "required": True, "max_length": 100}]}
+    client, transport = jaha_client(
+        Reply(200, {"products": [jaha_product(buyer_input=text_input)], "next_cursor": None}))
+    run(client.products())
+    body = {"product_code": "jaha_001", "quantity": 1, "max_unit_price_usdt": "10"}
+    with pytest.raises(Exception, match="buyer_input_needs_manual_integration"):
+        run(client.purchase(body, IDEMPOTENCY))
+    assert len(transport.calls) == 1  # Blocked before any POST left the shop.
+
+
+def test_jaha_lookup_preserves_slot_product_type():
+    client, _ = jaha_client(
+        Reply(200, {"products": [jaha_product("jaha_002", buyer_input=EMAIL_INPUT)],
+                    "next_cursor": None}),
+        Reply(200, jaha_order(code="jaha_002")))
+    run(client.products())
+    result = run(client.lookup_order("JD-1001"))
+    assert result is not None and result.product_type == "slot"
+
+
+def test_jaha_lookup_malformed_body_keeps_intent_uncertain():
+    client, _ = jaha_client(Reply(200, {"unexpected": True}))
+    assert run(client.lookup_order("JD-1001")) is None
+
+
 def test_jaha_error_mapping():
     # price_changed: documented rejection, a retry needs a new key and body.
     client, _ = jaha_client(Reply(409, {"status": 409, "code": "price_changed",
@@ -302,6 +351,25 @@ def test_elite_order_lookup():
     # Without a captured reference there is no documented history endpoint.
     client, _ = elite_client()
     assert run(client.recover_uncertain({"supplier_reference": ""})) is None
+
+
+def test_elite_products_paginate_full_catalog():
+    client, transport = elite_client(
+        Reply(200, [elite_product(pid) for pid in range(1, 101)]),
+        Reply(200, {"data": [elite_product(101)]}))
+    result = run(client.products())
+    assert len(result["products"]) == 101
+    assert transport.calls[0]["query"] == {"per_page": 100, "page": 1}
+    assert transport.calls[1]["query"] == {"per_page": 100, "page": 2}
+
+
+def test_elite_lookup_falls_back_to_synced_catalog_price():
+    order = elite_order()
+    del order["order"]["total"]  # No amount field in the response at all.
+    client, _ = elite_client(Reply(200, [elite_product()]), Reply(200, order))
+    run(client.products())  # Populates the cache the price fallback relies on.
+    result = run(client.lookup_order("551"))
+    assert result is not None and str(result.amount) == "4.25"
 
 
 def test_elite_mapping_rules():

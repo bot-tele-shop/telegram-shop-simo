@@ -486,10 +486,12 @@ class SupplierState:
             return [dict(r) for r in db.execute(
                 "SELECT * FROM supplier_intents WHERE state='uncertain' ORDER BY created_at LIMIT 20")]
 
-    def complete_recovered(self, order_id: str, result: PurchaseResult) -> None:
+    def complete_recovered(self, order_id: str, result: PurchaseResult) -> str | None:
         """Apply a purchase result obtained from a provider's documented
         order-lookup/history endpoint to an uncertain intent. Same hold checks
-        as finish(); nothing is re-sent and no evidence is discarded."""
+        as finish(); nothing is re-sent and no evidence is discarded.
+        Returns the hold reason when the result was held for an operator
+        (the intent stays uncertain and is re-checked slowly, not every pass)."""
         with self.store.transaction() as db:
             row = db.execute("SELECT i.*,o.state AS order_state FROM supplier_intents i "
                              "JOIN orders o ON o.id=i.order_id WHERE i.order_id=?", (order_id,)).fetchone()
@@ -505,17 +507,23 @@ class SupplierState:
             if row["order_state"] != "paid":
                 hold = "customer_payment_no_longer_payable"
             state = "uncertain" if hold else result.status
+            # A held result still needs an operator: re-check hourly at most,
+            # so auto-recovery cannot hot-loop on it or spam notifications.
+            next_attempt = self.store.clock() + 3600 if hold else 0
             db.execute("UPDATE supplier_intents SET state=?,response_ciphertext=?,delivery_ciphertext=?,"
                        "supplier_reference=?,actual_cost=?,hold_reason=?,lease_until=0,"
-                       "resolution_version=resolution_version+1,updated_at=? WHERE order_id=?",
+                       "next_attempt_at=?,resolution_version=resolution_version+1,updated_at=? "
+                       "WHERE order_id=?",
                        (state, self.encrypt(result.raw), self.encrypt(result.payload),
                         result.reference, str(result.amount),
-                        hold or "recovered_via_supplier_lookup", self.store.clock(), order_id))
+                        hold or "recovered_via_supplier_lookup", next_attempt,
+                        self.store.clock(), order_id))
             if state == "completed":
                 self._allocate_delivery(db, order_id, result.payload, row["provider"])
             else:
                 db.execute("UPDATE orders SET error_code=? WHERE id=? AND state='paid'",
                            ("supplier_" + state, order_id))
+        return hold
 
     def review(self) -> list[dict]:
         with self.store.connection() as db:
