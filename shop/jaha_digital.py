@@ -261,7 +261,7 @@ class JahaClient:
             "name": name,
             "productType": product_type,
             # USDT is USD-pegged; normalized at this boundary.
-            "price": {"amount": amount, "currency": "USD", "text": f"USDT {amount}"},
+            "price": {"amount": str(amount), "currency": "USD", "text": f"USDT {amount}"},
             "availability": {"available": available if status == "available" else 0, "sold": 0},
             "promotions": [],
             "purchaseRequirements": requirements,
@@ -278,7 +278,7 @@ class JahaClient:
         if account.get("currency") != "USDT":
             raise CanbosoError("unsupported_wallet_currency")
         amount = money(account.get("balance_usdt"))
-        return {"balance": amount, "walletCurrency": "USD",
+        return {"balance": str(amount), "walletCurrency": "USD",
                 "balanceText": f"USDT {amount}",
                 "accountStatus": text(account.get("status"), "invalid_account_status")}
 
@@ -392,12 +392,13 @@ class JahaClient:
         if len(payload.encode()) > 1_000_000:
             raise CanbosoError("delivery_too_large")
         # Slot (email-collection) products must keep their type so finish()
-        # and recovery holds compare like with like; default only when the
-        # catalog has not been synced yet.
+        # and recovery holds compare like with like. On a cold cache (process
+        # restarted before the first sync) report unknown instead of guessing:
+        # the store only holds on a known mismatch, never on missing data.
         known = self._products.get(str(order.get("product_code")), {})
         product_type = known.get("productType")
         if product_type not in ("account", "slot"):
-            product_type = "account"
+            product_type = None
         return PurchaseResult(reference, state, amount, "USD", payload, body,
                               product_type=product_type)
 

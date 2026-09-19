@@ -220,7 +220,7 @@ class EliteClient:
             "productId": product_id,
             "name": name,
             "productType": "account",
-            "price": {"amount": amount, "currency": "USD", "text": f"USD {amount}"},
+            "price": {"amount": str(amount), "currency": "USD", "text": f"USD {amount}"},
             "availability": {"available": stock, "sold": 0},
             "promotions": [],
             "purchaseRequirements": {"quantityFixed": 1},
@@ -235,7 +235,7 @@ class EliteClient:
         if "currency" in result and result["currency"] not in ("USD", "USDT"):
             raise CanbosoError("unsupported_wallet_currency")
         amount = money(result.get("balance"))
-        normalized: dict[str, Any] = {"balance": amount, "walletCurrency": "USD",
+        normalized: dict[str, Any] = {"balance": str(amount), "walletCurrency": "USD",
                                       "balanceText": f"USD {amount}"}
         for optional in ("credit_limit", "creditLimit"):
             if optional in result:
@@ -322,7 +322,7 @@ class EliteClient:
             product = self._products.get(str(requested if requested is not None else echoed))
             if not product:
                 raise CanbosoError("missing_purchase_amount")
-            amount = product["price"]["amount"]
+            amount = money(product["price"]["amount"])
         credentials = order.get("credentials", order.get("credential", order.get("delivery")))
         payload = self._payload_text(credentials)
         return PurchaseResult(reference, "completed", amount, "USD", payload,

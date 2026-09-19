@@ -195,7 +195,7 @@ class AcczoneClient:
             "productId": key,
             "name": name,
             "productType": "account",
-            "price": {"amount": amount, "currency": "USD", "text": f"USD {amount}"},
+            "price": {"amount": str(amount), "currency": "USD", "text": f"USD {amount}"},
             "availability": {"available": 1 if active == 1 else 0, "sold": 0},
             "promotions": [],
             "purchaseRequirements": {"quantityFixed": 1},
@@ -210,7 +210,7 @@ class AcczoneClient:
         if "currency" in result and result["currency"] not in ("USD", "USDT"):
             raise CanbosoError("unsupported_wallet_currency")
         amount = money(result.get("balance"))
-        return {"balance": amount, "walletCurrency": "USD", "balanceText": f"USD {amount}"}
+        return {"balance": str(amount), "walletCurrency": "USD", "balanceText": f"USD {amount}"}
 
     async def purchase(self, exact_body: dict, idempotency_key: str) -> PurchaseResult:
         """One documented GET /buyCpn. Never retried: there is no idempotency,
@@ -293,7 +293,7 @@ class AcczoneClient:
             # The purchase succeeded; the price comes from the last catalog
             # sync, so a missing cache entry means the response needs review.
             raise CanbosoError("missing_purchase_amount")
-        return service["price"]["amount"]
+        return money(service["price"]["amount"])
 
     async def recover_uncertain(self, intent: dict) -> PurchaseResult | None:
         """Read-only recovery via GET /getHistory. Adopts the purchase only
