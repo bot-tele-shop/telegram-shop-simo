@@ -391,6 +391,7 @@ def test_acczone_never_allows_an_operator_resend(multi_store):
 
 def test_worker_recovers_uncertain_intent_via_provider_lookup(multi_store):
     from decimal import Decimal as D
+
     from shop.canboso import PurchaseResult as PR
     multi_store.upsert_product({
         "sku": "jaha_digital-sku", "title": "Jaha", "description": "x", "category": "Keys",

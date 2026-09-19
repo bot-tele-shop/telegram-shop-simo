@@ -11,7 +11,6 @@ import pytest
 from shop import acczone, elite_emporium, jaha_digital, providers
 from shop.canboso import (
     PurchaseRejected,
-    PurchaseResult,
     PurchaseUncertain,
     RateLimited,
     Reply,

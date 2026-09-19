@@ -15,7 +15,6 @@ import asyncio
 import json
 import re
 import time
-from decimal import Decimal
 from typing import Any
 
 import aiohttp
