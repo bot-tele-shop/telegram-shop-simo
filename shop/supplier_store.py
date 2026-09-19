@@ -88,6 +88,12 @@ class SupplierState:
             return CanbosoSettings()
         return SupplierSettings(provider=provider)
 
+    def _provider_names(self) -> set[str]:
+        registry = providers.PROVIDERS
+        names = set(self._settings)
+        names.update(registry.keys() if isinstance(registry, dict) else registry)
+        return names
+
     def purchases_allowed(self) -> bool:
         return any(s.allow_purchases for s in self._settings.values())
 
@@ -361,9 +367,22 @@ class SupplierState:
             # an automatic replay after an undocumented idempotency-retention period.
             db.execute("UPDATE supplier_intents SET state='uncertain',hold_reason='process_interrupted',"
                        "updated_at=? WHERE state='processing' AND lease_until<=?", (now, now))
-            rows = db.execute("SELECT i.* FROM supplier_intents i JOIN orders o ON o.id=i.order_id "
-                              "WHERE i.state IN ('queued','retry_wait','retry_approved') AND i.next_attempt_at<=? "
-                              "AND o.state='paid' ORDER BY i.created_at LIMIT 10", (now,)).fetchall()
+            # Exclude disabled or cooling-down providers in SQL so a pile of
+            # their intents cannot starve a claimable intent from another
+            # provider beyond the fetch limit.
+            blocked = {name for name in self._provider_names()
+                       if not self.settings_for(name).enabled}
+            for meta in db.execute("SELECT key,value FROM metadata WHERE key LIKE '%_not_before'"):
+                if float(meta[1]) > now:
+                    blocked.add(meta[0][:-len("_not_before")])
+            query = ("SELECT i.* FROM supplier_intents i JOIN orders o ON o.id=i.order_id "
+                     "WHERE i.state IN ('queued','retry_wait','retry_approved') AND i.next_attempt_at<=? "
+                     "AND o.state='paid'")
+            params: list = [now]
+            if blocked:
+                query += f" AND i.provider NOT IN ({','.join('?' * len(blocked))})"
+                params.extend(sorted(blocked))
+            rows = db.execute(query + " ORDER BY i.created_at LIMIT 10", params).fetchall()
             for row in rows:
                 provider = row["provider"]
                 settings = self.settings_for(provider)

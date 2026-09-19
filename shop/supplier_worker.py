@@ -33,15 +33,15 @@ class SupplierWorker:
         self.wake.set()
 
     async def synchronize(self) -> bool:
-        """Refresh every configured provider; route and reprice from all fresh
-        snapshots. Any provider failure pauses purchasing for this tick."""
+        """Refresh every configured provider; route and reprice from the fresh
+        snapshots. A failing or cooling-down provider sits out the round
+        without pausing the healthy ones."""
         snapshots: dict[str, dict] = {}
-        synced = False
         for provider, client in self.clients.items():
             if not self.store.supplier.settings_for(provider).enabled:
                 continue
             if await asyncio.to_thread(self.store.supplier.cooldown_until, provider) > self.store.clock():
-                return False
+                continue
             try:
                 products = await client.products()
                 balance = await client.balance()
@@ -53,10 +53,9 @@ class SupplierWorker:
                     self.store.supplier.defer_network, exc.retry_after or 60, provider
                 )
                 log.warning("Supplier synchronization paused for %s (%s)", provider, exc.code)
-                return False
+                continue
             snapshots[provider] = products
-            synced = True
-        if not synced:
+        if not snapshots:
             return False
         self.last_sync = self.store.clock()
         await self.route_and_reprice(snapshots)

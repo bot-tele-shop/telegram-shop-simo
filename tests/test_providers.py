@@ -1,6 +1,7 @@
 """Multi-provider registry, per-provider state isolation, and safe fallbacks."""
 import asyncio
 import json
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -262,9 +263,81 @@ def test_worker_provider_failure_pauses_only_that_provider(multi_store, clock):
     worker = SupplierWorker(
         multi_store, {"canboso": canboso_client, "jaha_digital": jaha_client}, delivery,
     )
-    assert asyncio.run(worker.synchronize()) is False
+    # Canboso stays healthy: it still syncs and the round counts as ready.
+    assert asyncio.run(worker.synchronize()) is True
     assert multi_store.supplier.cooldown_until("jaha_digital") == clock[0] + 30
     assert multi_store.supplier.cooldown_until("canboso") == 0
+    with multi_store.connection() as db:
+        names = {row["name"] for row in db.execute("SELECT name FROM supplier_cache")}
+    assert "canboso:products" in names
+    assert "jaha_digital:products" not in names
+
+
+def test_worker_all_providers_failing_pauses_the_round(multi_store, clock):
+    client = FakeClient(error=CanbosoError("supplier_rate_limited", retry_after=30))
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    delivery = DeliveryWorker(multi_store, bot, frozenset({999}))
+    worker = SupplierWorker(multi_store, client, delivery)
+    assert asyncio.run(worker.synchronize()) is False
+    assert multi_store.supplier.cooldown_until("canboso") == clock[0] + 30
+
+
+def test_worker_cooldown_skips_only_that_provider(multi_store, clock):
+    multi_store.supplier.defer_network(60, "canboso")
+    canboso_client = FakeClient()
+    jaha_client = FakeClient(products=catalog("jaha_pid"))
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    delivery = DeliveryWorker(multi_store, bot, frozenset({999}))
+    worker = SupplierWorker(
+        multi_store, {"canboso": canboso_client, "jaha_digital": jaha_client}, delivery,
+    )
+    assert asyncio.run(worker.synchronize()) is True
+    assert canboso_client.calls == []
+    assert jaha_client.calls == ["products", "balance"]
+
+
+def test_claim_skips_a_cooling_down_providers_backlog(multi_store, clock):
+    store = multi_store
+    store.supplier.cache_snapshot("canboso", catalog("cb_pid"), wallet())
+    supplier_product(store, "cb-claim", "canboso", "cb_pid")
+    supplier_product(store, "jaha-claim", "jaha_digital", "jaha_pid")
+    now = clock[0]
+    jaha_hash = store.supplier.settings_for("jaha_digital").key_fingerprint
+    body = store.supplier.encrypt({"productId": "jaha_pid", "productType": "account"})
+    with store.transaction() as db:
+        # A backlog of older queued intents for the cooling-down provider.
+        for i in range(12):
+            oid = f"jaha-order-{i}"
+            db.execute("INSERT INTO orders(id,user_id,sku,title,price_stars,terms_version,state,"
+                       "created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (oid, 101, "jaha-claim", "Multi jaha-claim", 400, "terms-v1", "paid",
+                        now - 100 + i, now - 100 + i, now + 900))
+            db.execute("INSERT INTO supplier_intents(order_id,idempotency_key,request_ciphertext,"
+                       "key_hash,provider,product_id,product_type,max_cost,currency,state,"
+                       "budget_held,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (oid, f"ds-{oid}", body, jaha_hash, "jaha_digital", "jaha_pid",
+                        "account", "10", "USD", "queued", 1, now - 100 + i, now - 100 + i))
+    store.accept_terms(101, "terms-v1")
+    order = store.create_order(101, "cb-claim", "terms-v1")
+    with store.transaction() as db:
+        store.supplier.queue_paid(db, order["id"])
+    store.supplier.defer_network(60, "jaha_digital")
+    # The canboso intent is newer than the whole jaha backlog; it must still win.
+    assert store.supplier.claim()["order_id"] == order["id"]
+    assert store.supplier.claim() is None
+
+
+def test_cli_preview_skips_a_provider_with_a_rotated_key(multi_store, capsys):
+    from shop.__main__ import cached_products_snapshots
+    multi_store.supplier.cache_snapshot("canboso", catalog("cb_pid"), wallet())
+    multi_store.supplier.cache_snapshot("jaha_digital", catalog("jaha_pid"), wallet())
+    settings = SimpleNamespace(all_supplier_settings=lambda: {
+        "canboso": CANBOSO,
+        "jaha_digital": replace(JAHA, api_key="TEST_ONLY_ROTATED_JAHA_KEY"),
+    })
+    snapshots = cached_products_snapshots(multi_store, settings, 600)
+    assert set(snapshots) == {"canboso"}
+    assert "Jaha Digital" in capsys.readouterr().err
 
 
 def test_pricing_uses_the_mappings_own_provider_snapshot(multi_store):

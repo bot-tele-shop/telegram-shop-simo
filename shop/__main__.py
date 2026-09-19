@@ -241,10 +241,11 @@ def cached_products_snapshots(store, settings, max_age: int) -> dict[str, dict]:
         except ShopError:
             continue  # Never synced; routing/pricing simply skip this provider.
         if key_hash != supplier.key_fingerprint:
-            raise ShopError(
-                f"No supplier snapshot cached for this {providers.display(name)} buyer key; "
-                "run supplier-sync first"
-            )
+            # A rotated key on one provider must not kill the whole preview;
+            # routing/pricing simply skip it like a never-synced provider.
+            print(f"warning: no supplier snapshot cached for this {providers.display(name)} "
+                  "buyer key; skipping (run supplier-sync first)", file=sys.stderr)
+            continue
         if age > max_age:
             raise ShopError(
                 f"Cached {providers.display(name)} snapshot is {int(age)}s old; "
