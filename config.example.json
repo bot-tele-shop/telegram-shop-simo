@@ -21,5 +21,32 @@
     "acknowledge_price_race": false,
     "budget_currency": "",
     "spend_budget": "0"
+  },
+  "jaha_digital": {
+    "enabled": false,
+    "api_key": "",
+    "allow_purchases": false,
+    "resale_authorized": false,
+    "acknowledge_price_race": false,
+    "budget_currency": "",
+    "spend_budget": "0"
+  },
+  "elite_emporium": {
+    "enabled": false,
+    "api_key": "",
+    "allow_purchases": false,
+    "resale_authorized": false,
+    "acknowledge_price_race": false,
+    "budget_currency": "",
+    "spend_budget": "0"
+  },
+  "acczone": {
+    "enabled": false,
+    "api_key": "",
+    "allow_purchases": false,
+    "resale_authorized": false,
+    "acknowledge_price_race": false,
+    "budget_currency": "",
+    "spend_budget": "0"
   }
 }

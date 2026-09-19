@@ -17,7 +17,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
-class CanbosoSettings:
+class SupplierSettings:
+    """Per-provider buyer credentials and spending locks. One instance per
+    registered supplier provider; defaults keep everything disabled."""
+    provider: str = "canboso"
     enabled: bool = False
     api_key: str = field(default="", repr=False)
     allow_purchases: bool = False
@@ -33,17 +36,22 @@ class CanbosoSettings:
     def problems(self, environment: str) -> list[str]:
         from decimal import Decimal, InvalidOperation
 
+        from . import providers
+
+        display = providers.display(self.provider)
+        known = providers.entry(self.provider)
+        key_hint = known.api_key_env if known else "the buyer API key"
         issues = []
         if self.enabled and (not isinstance(self.api_key, str) or not 8 <= len(self.api_key) <= 512
                              or any(ord(c) < 33 for c in self.api_key)):
-            issues.append("Set CANBOSO_API_KEY locally; never put the buyer key in chat or logs")
+            issues.append(f"Set {key_hint} locally; never put the buyer key in chat or logs")
         if self.allow_purchases:
             if not self.enabled or environment != "production":
-                issues.append("Live Canboso purchasing requires enabled integration and production mode")
+                issues.append(f"Live {display} purchasing requires enabled integration and production mode")
             if not self.resale_authorized:
                 issues.append("Confirm you are authorized to resell the selected supplier products")
             if not self.acknowledge_price_race:
-                issues.append("Acknowledge that Canboso has no server-side maximum-price parameter")
+                issues.append(f"Acknowledge that {display} has no server-side maximum-price parameter")
             if self.budget_currency not in {"VND", "USD"}:
                 issues.append("Set budget_currency to the currency reported by your supplier wallet")
             try:
@@ -53,6 +61,11 @@ class CanbosoSettings:
             except (InvalidOperation, ValueError):
                 issues.append("Set a positive cumulative spend_budget before enabling purchases")
         return issues
+
+
+@dataclass(frozen=True)
+class CanbosoSettings(SupplierSettings):
+    provider: str = "canboso"
 
 
 @dataclass(frozen=True)
@@ -69,9 +82,15 @@ class Settings:
     terms_text: str = ""
     privacy_text: str = ""
     canboso: CanbosoSettings = field(default_factory=CanbosoSettings)
+    # Registered non-Canboso supplier providers, keyed by provider name.
+    other_suppliers: dict = field(default_factory=dict)
     # Stars charged per one unit of supplier currency, e.g. {"USD": Decimal("50")}.
     # Required before a product in that currency can use auto pricing.
     stars_fx: dict = field(default_factory=dict)
+
+    def all_supplier_settings(self) -> dict:
+        """Every configured supplier provider, keyed by registry name."""
+        return {"canboso": self.canboso, **self.other_suppliers}
 
     @property
     def terms_version(self) -> str:
@@ -114,7 +133,8 @@ class Settings:
                     raise InvalidOperation
             except (InvalidOperation, ValueError):
                 issues.append(f"stars_fx rate for {currency} must be a positive number")
-        issues.extend(self.canboso.problems(self.environment))
+        for supplier in self.all_supplier_settings().values():
+            issues.extend(supplier.problems(self.environment))
         return issues
 
     def validate(self, *, require_bot: bool = True) -> None:
@@ -138,21 +158,28 @@ def load_settings(path: Path | None = None) -> Settings:
         admin_ids = [int(x.strip()) for x in os.environ["ADMIN_IDS"].split(",") if x.strip()]
     if not isinstance(admin_ids, list) or any(type(x) is not int for x in admin_ids):
         raise ValueError("admin_ids must be a JSON array of integers")
-    supplier = raw.get("canboso", {})
-    if not isinstance(supplier, dict):
-        raise ValueError("canboso must be a JSON object")
-    for name in ("enabled", "allow_purchases", "resale_authorized", "acknowledge_price_race"):
-        if name in supplier and type(supplier[name]) is not bool:
-            raise ValueError(f"canboso.{name} must be a JSON boolean")
-    canboso = CanbosoSettings(
-        enabled=supplier.get("enabled", False),
-        api_key=os.getenv("CANBOSO_API_KEY", supplier.get("api_key", "")),
-        allow_purchases=supplier.get("allow_purchases", False),
-        resale_authorized=supplier.get("resale_authorized", False),
-        acknowledge_price_race=supplier.get("acknowledge_price_race", False),
-        budget_currency=supplier.get("budget_currency", ""),
-        spend_budget=str(supplier.get("spend_budget", "0")),
-    )
+    from .providers import PROVIDERS
+
+    suppliers: dict[str, SupplierSettings] = {}
+    for name, entry in PROVIDERS.items():
+        section = raw.get(entry.config_section, {})
+        if not isinstance(section, dict):
+            raise ValueError(f"{entry.config_section} must be a JSON object")
+        for flag in ("enabled", "allow_purchases", "resale_authorized", "acknowledge_price_race"):
+            if flag in section and type(section[flag]) is not bool:
+                raise ValueError(f"{entry.config_section}.{flag} must be a JSON boolean")
+        kwargs = dict(
+            provider=name,
+            enabled=section.get("enabled", False),
+            api_key=os.getenv(entry.api_key_env, section.get("api_key", "")),
+            allow_purchases=section.get("allow_purchases", False),
+            resale_authorized=section.get("resale_authorized", False),
+            acknowledge_price_race=section.get("acknowledge_price_race", False),
+            budget_currency=section.get("budget_currency", ""),
+            spend_budget=str(section.get("spend_budget", "0")),
+        )
+        suppliers[name] = CanbosoSettings(**kwargs) if name == "canboso" else SupplierSettings(**kwargs)
+    canboso = suppliers["canboso"]
     stars_fx_raw = raw.get("stars_fx", {})
     if not isinstance(stars_fx_raw, dict):
         raise ValueError("stars_fx must be a JSON object like {\"USD\": \"50\"}")
@@ -181,6 +208,7 @@ def load_settings(path: Path | None = None) -> Settings:
         terms_text=raw.get("terms_text", ""),
         privacy_text=raw.get("privacy_text", ""),
         canboso=canboso,
+        other_suppliers={k: v for k, v in suppliers.items() if k != "canboso"},
         stars_fx=stars_fx,
     )
 

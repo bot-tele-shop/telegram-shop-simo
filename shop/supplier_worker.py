@@ -5,7 +5,7 @@ import asyncio
 import logging
 import sys
 
-from .canboso import CanbosoClient, CanbosoError, PurchaseRejected, RateLimited
+from .canboso import CanbosoError, PurchaseRejected, RateLimited
 from .delivery import DeliveryWorker
 from .store import Store
 
@@ -13,10 +13,12 @@ log = logging.getLogger(__name__)
 
 
 class SupplierWorker:
-    def __init__(self, store: Store, client: CanbosoClient, delivery: DeliveryWorker,
+    def __init__(self, store: Store, client, delivery: DeliveryWorker,
                  pricer=None, router=None):
         self.store = store
-        self.client = client
+        # One client per provider; a bare client is the original Canboso one.
+        self.clients: dict = dict(client) if isinstance(client, dict) else {"canboso": client}
+        self.client = self.clients.get("canboso")
         self.delivery = delivery
         self.pricer = pricer
         self.router = router
@@ -31,24 +33,38 @@ class SupplierWorker:
         self.wake.set()
 
     async def synchronize(self) -> bool:
-        if self.store.supplier.cooldown_until() > self.store.clock():
-            return False
-        try:
-            products = await self.client.products()
-            balance = await self.client.balance()
-            await asyncio.to_thread(self.store.supplier.cache_snapshot, products, balance)
-        except CanbosoError as exc:
-            await asyncio.to_thread(self.store.supplier.defer_network, exc.retry_after or 60)
-            log.warning("Supplier synchronization paused (%s)", exc.code)
+        """Refresh every configured provider; route and reprice from all fresh
+        snapshots. Any provider failure pauses purchasing for this tick."""
+        snapshots: dict[str, dict] = {}
+        synced = False
+        for provider, client in self.clients.items():
+            if not self.store.supplier.settings_for(provider).enabled:
+                continue
+            if await asyncio.to_thread(self.store.supplier.cooldown_until, provider) > self.store.clock():
+                return False
+            try:
+                products = await client.products()
+                balance = await client.balance()
+                await asyncio.to_thread(
+                    self.store.supplier.cache_snapshot, provider, products, balance
+                )
+            except CanbosoError as exc:
+                await asyncio.to_thread(
+                    self.store.supplier.defer_network, exc.retry_after or 60, provider
+                )
+                log.warning("Supplier synchronization paused for %s (%s)", provider, exc.code)
+                return False
+            snapshots[provider] = products
+            synced = True
+        if not synced:
             return False
         self.last_sync = self.store.clock()
-        await self.route_and_reprice(products)
+        await self.route_and_reprice(snapshots)
         return True
 
-    async def route_and_reprice(self, products: dict) -> None:
+    async def route_and_reprice(self, snapshots: dict) -> None:
         """Pick the cheapest in-stock supplier per SKU, then reprice from the
         winner's cost. A failure here must never break the sync/purchase loop."""
-        snapshots = {"canboso": products}
         if self.router is not None:
             try:
                 decisions = await asyncio.to_thread(self.router.route, snapshots)
@@ -71,7 +87,7 @@ class SupplierWorker:
         if self.pricer is None:
             return
         try:
-            changes = await asyncio.to_thread(self.pricer.reprice, products)
+            changes = await asyncio.to_thread(self.pricer.reprice, snapshots)
         except Exception:
             log.error("Repricer failed (%s)", type(sys.exc_info()[1]).__name__)
             return
@@ -93,12 +109,21 @@ class SupplierWorker:
         if intent is None:
             return False
         order_id = intent["order_id"]
+        client = self.clients.get(intent["provider"])
+        if client is None:
+            # Never sent anything; hold for the operator instead of guessing.
+            await asyncio.to_thread(
+                self.store.supplier.fail, order_id, "provider_client_not_configured"
+            )
+            return True
         # The processing lease is already durable. Cancellation or a hard crash
         # leaves an uncertain intent for operator review, never a fresh purchase.
         try:
-            result = await self.client.purchase(intent["body"], intent["idempotency_key"])
+            result = await client.purchase(intent["body"], intent["idempotency_key"])
         except RateLimited as exc:
-            await asyncio.to_thread(self.store.supplier.defer_network, exc.retry_after or 60)
+            await asyncio.to_thread(
+                self.store.supplier.defer_network, exc.retry_after or 60, intent["provider"]
+            )
             await asyncio.to_thread(self.store.supplier.fail, order_id, exc.code)
         except PurchaseRejected as exc:
             await asyncio.to_thread(self.store.supplier.fail, order_id, exc.code, rejected=True)
@@ -134,7 +159,7 @@ class SupplierWorker:
         ready = True
         if self.store.clock() - self.last_sync >= 45:
             ready = await self.synchronize()
-        if ready and self.store.supplier.settings.allow_purchases:
+        if ready and self.store.supplier.purchases_allowed():
             await self.purchase_one()
         await self.notify_reviews()
 

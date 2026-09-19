@@ -24,6 +24,7 @@ from aiogram.types import (
     TelegramObject,
 )
 
+from . import providers
 from .canboso import CanbosoError, valid_email
 from .config import Settings
 from .delivery import DeliveryWorker, send_delivery
@@ -93,6 +94,7 @@ class EventGuard(BaseMiddleware):
 
 def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -> Dispatcher:
     store.supplier.configure(settings.canboso)
+    store.supplier.configure_many(settings.other_suppliers.values())
     router = Router(name="shop")
     guard = EventGuard()
     router.message.outer_middleware(guard)
@@ -110,6 +112,9 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
         )
         email = f"Email: {saved['customer_email']}\n" if "customer_email" in saved else ""
         return f"{email}Duration: {duration}"
+
+    def supplier_name(spec: dict | None) -> str:
+        return providers.display((spec or {}).get("provider") or "canboso")
 
     def supplier_status(info: dict) -> str:
         states = {
@@ -144,10 +149,11 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
 
     async def slot_confirmation(message: Message, order: dict, user_id: int) -> None:
         saved = await asyncio.to_thread(store.supplier.preview_input, order["id"], user_id)
+        spec = await asyncio.to_thread(store.supplier.mapping, order["sku"])
         await message.answer(
             f"Confirm slot details\nOrder {order['id']}\n{order['title']}\n"
             f"Price: {order['price_stars']} Stars\n{slot_details(saved)}\n\n"
-            "This email will be shared with Canboso, the supplier, to fulfill your slot. "
+            f"This email will be shared with {supplier_name(spec)}, the supplier, to fulfill your slot. "
             "Confirm the saved email and duration before receiving an invoice. "
             "No payment or supplier purchase has been made. "
             "Use /shop to start again with a different email, or /orders to recover this draft.",
@@ -630,7 +636,8 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
             if product["source"] == "supplier":
                 spec = await asyncio.to_thread(store.supplier.mapping, product["sku"])
                 details = (
-                    "Fulfilled by Canboso after payment. Supplier availability is checked locally."
+                    f"Fulfilled by {supplier_name(spec)} after payment. "
+                    "Supplier availability is checked locally."
                 )
                 if spec["product_type"] == "slot":
                     details += "\n" + slot_details(spec)
@@ -678,7 +685,7 @@ def build_dispatcher(settings: Settings, store: Store, worker: DeliveryWorker) -
                         f"{product['title']}\nPrice: {product['price_stars']} Stars\n"
                         f"{slot_details(spec)}\n\n"
                         "Send the email address for your slot in this private chat. "
-                        "This email will be shared with Canboso, the supplier, to fulfill the slot. "
+                        f"This email will be shared with {supplier_name(spec)}, the supplier, to fulfill the slot. "
                         "You will review the saved email and duration and confirm before an invoice "
                         "is sent. Email entry expires after 10 minutes. Use /cancel to stop.",
                         parse_mode=None,

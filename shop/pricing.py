@@ -119,25 +119,35 @@ class Pricer:
                 ).fetchall()
         return [dict(r) for r in rows]
 
-    def reprice(self, snapshot_products: dict, *, dry_run: bool = False) -> list[PriceChange]:
-        """Apply auto rules against a fresh supplier snapshot. Never raises on
-        per-product data problems; those become flagged events or skips."""
+    def reprice(self, snapshots: dict, *, dry_run: bool = False) -> list[PriceChange]:
+        """Apply auto rules against fresh supplier snapshots, keyed by provider
+        (a bare single-provider snapshot is accepted as the Canboso one).
+        Never raises on per-product data problems; those become flagged events
+        or skips."""
+        if "products" in snapshots:
+            snapshots = {"canboso": snapshots}
         changes: list[PriceChange] = []
         with self.store.transaction() as db:
             rows = db.execute(
                 "SELECT r.*,p.price_stars FROM pricing_rules r JOIN products p ON p.sku=r.sku "
                 "WHERE r.mode='auto' AND p.active=1"
             ).fetchall()
-            available = {
-                p.get("productId"): p
-                for p in snapshot_products.get("products", [])
-                if isinstance(p, dict)
+            catalogs = {
+                provider: {
+                    p.get("productId"): p
+                    for p in (snapshot or {}).get("products", [])
+                    if isinstance(p, dict)
+                }
+                for provider, snapshot in snapshots.items()
             }
             for rule in rows:
                 sku = rule["sku"]
                 old_price = rule["price_stars"]
                 try:
                     mapping = self.store.supplier.mapping(sku, db)
+                    available = catalogs.get(mapping.get("provider", "canboso"))
+                    if available is None:
+                        continue  # That provider did not sync this round.
                     found = available.get(mapping["product_id"])
                     if not found:
                         continue  # Out of catalog; preflight already blocks purchases.

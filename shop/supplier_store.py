@@ -1,4 +1,8 @@
-"""Canboso state is additive to v1 storage; existing inventory remains intact.
+"""Supplier state is additive to v1 storage; existing inventory remains intact.
+
+State is provider-agnostic: every snapshot, cooldown, budget and purchase
+intent is scoped to one registered provider (see shop/providers.py), so
+several suppliers can serve the shop without sharing wallets or quotas.
 
 There is no documented supplier order-status or refund endpoint. An uncertain
 purchase never becomes a new purchase automatically. Approved manual resolutions
@@ -13,10 +17,10 @@ import sqlite3
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from .canboso import CanbosoError, PurchaseResult, money, valid_email
-from .config import CanbosoSettings
+from . import providers
+from .canboso import CanbosoError, PurchaseResult, money
+from .config import CanbosoSettings, SupplierSettings
 from .errors import ShopError
-from .providers import registered
 
 if TYPE_CHECKING:
     from .store import Store
@@ -30,7 +34,8 @@ CREATE TABLE IF NOT EXISTS supplier_cache (
 );
 CREATE TABLE IF NOT EXISTS supplier_intents (
     order_id TEXT PRIMARY KEY REFERENCES orders(id), idempotency_key TEXT NOT NULL UNIQUE,
-    request_ciphertext TEXT NOT NULL, key_hash TEXT NOT NULL, product_id TEXT NOT NULL,
+    request_ciphertext TEXT NOT NULL, key_hash TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'canboso',
+    product_id TEXT NOT NULL,
     product_type TEXT NOT NULL, max_cost TEXT NOT NULL, currency TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'draft', response_ciphertext TEXT NOT NULL DEFAULT '',
     delivery_ciphertext TEXT NOT NULL DEFAULT '', supplier_reference TEXT NOT NULL DEFAULT '',
@@ -47,16 +52,47 @@ CREATE TABLE IF NOT EXISTS supplier_audit (
 """
 
 
+def migrate(db: sqlite3.Connection) -> None:
+    """Bring pre-multi-provider databases forward. Existing intents were all
+    Canboso purchases, so the added column's default is the correct value."""
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(supplier_intents)")}
+    if columns and "provider" not in columns:
+        db.execute("ALTER TABLE supplier_intents ADD COLUMN provider TEXT NOT NULL DEFAULT 'canboso'")
+    # Snapshot rows are now named "<provider>:<kind>"; pre-rename rows fail the
+    # freshness check within two minutes anyway, so just drop them.
+    db.execute("DELETE FROM supplier_cache WHERE name NOT LIKE '%:%'")
+
+
 class SupplierState:
     def __init__(self, store: Store):
         self.store = store
-        self.settings = CanbosoSettings()
+        self._settings: dict[str, SupplierSettings] = {}
 
-    def configure(self, settings: CanbosoSettings) -> None:
-        self.settings = settings
+    def configure(self, settings: SupplierSettings) -> None:
+        self._settings[settings.provider] = settings
 
-    def assert_enabled(self) -> None:
-        s = self.settings
+    def configure_many(self, all_settings) -> None:
+        for settings in all_settings:
+            self.configure(settings)
+
+    @property
+    def settings(self) -> SupplierSettings:
+        """The Canboso configuration, for the original single-supplier callers."""
+        return self.settings_for("canboso")
+
+    def settings_for(self, provider: str = "canboso") -> SupplierSettings:
+        configured = self._settings.get(provider)
+        if configured is not None:
+            return configured
+        if provider == "canboso":
+            return CanbosoSettings()
+        return SupplierSettings(provider=provider)
+
+    def purchases_allowed(self) -> bool:
+        return any(s.allow_purchases for s in self._settings.values())
+
+    def assert_enabled(self, provider: str = "canboso") -> None:
+        s = self.settings_for(provider)
         if not s.enabled or not s.allow_purchases or s.problems(self.store.environment):
             raise ShopError("Supplier checkout is not connected yet or live purchasing is locked")
 
@@ -67,8 +103,9 @@ class SupplierState:
         return json.loads(self.store.cipher.decrypt(ciphertext.encode()))
 
     def set_mapping(self, db: sqlite3.Connection, sku: str, specification: dict) -> None:
-        if not isinstance(specification, dict) or not registered(specification.get("provider", "")):
+        if not isinstance(specification, dict) or not providers.registered(specification.get("provider", "")):
             raise ShopError("Supplier specification requires a registered provider")
+        provider = specification["provider"]
         product_id = specification.get("product_id")
         product_type = specification.get("product_type")
         if not isinstance(product_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", product_id):
@@ -82,14 +119,10 @@ class SupplierState:
             ceiling = money(specification.get("max_cost"), positive=True)
         except CanbosoError as exc:
             raise ShopError("Set a positive max_cost in supplier currency") from exc
-        months = specification.get("slot_months")
-        if product_id == "slot_chatgpt_business":
-            if product_type != "slot" or type(months) is not int or months not in {1, 3, 6, 12}:
-                raise ShopError("Business slots need a fixed slot_months variant: 1, 3, 6 or 12")
-        elif months is not None:
-            raise ShopError("Do not send slot_months for catalog slots or account products")
-        clean = {"provider": specification["provider"], "product_id": product_id,
+        providers.validate_spec(specification)
+        clean = {"provider": provider, "product_id": product_id,
                  "product_type": product_type, "currency": currency, "max_cost": str(ceiling)}
+        months = specification.get("slot_months")
         if months is not None:
             clean["slot_months"] = months
         db.execute("INSERT INTO supplier_mappings VALUES (?,?) ON CONFLICT(sku) DO UPDATE SET "
@@ -116,40 +149,65 @@ class SupplierState:
             ).fetchall()
         return {row["sku"]: json.loads(row["specification"]) for row in rows}
 
-    def cache_snapshot(self, products: dict, balance: dict) -> None:
+    @staticmethod
+    def _cache_name(provider: str, kind: str) -> str:
+        return f"{provider}:{kind}"
+
+    def cache_snapshot(self, provider: str, products: dict, balance: dict) -> None:
+        fingerprint = self.settings_for(provider).key_fingerprint
         with self.store.transaction() as db:
-            for name, body in (("products", products), ("balance", balance)):
+            for kind, body in (("products", products), ("balance", balance)):
                 db.execute("INSERT INTO supplier_cache VALUES (?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
                            "key_hash=excluded.key_hash,ciphertext=excluded.ciphertext,fetched_at=excluded.fetched_at",
-                           (name, self.settings.key_fingerprint, self.encrypt(body), self.store.clock()))
+                           (self._cache_name(provider, kind), fingerprint,
+                            self.encrypt(body), self.store.clock()))
 
-    def cooldown_until(self, db: sqlite3.Connection | None = None) -> float:
+    def cached_products(self, provider: str) -> tuple[dict, float, str]:
+        """Decrypted cached catalog for CLI dry runs; no network. Returns the
+        snapshot, its age in seconds and the owning key fingerprint."""
+        with self.store.connection() as db:
+            row = db.execute(
+                "SELECT * FROM supplier_cache WHERE name=?",
+                (self._cache_name(provider, "products"),),
+            ).fetchone()
+        if not row:
+            raise ShopError(
+                f"No supplier snapshot cached for {providers.display(provider)}; "
+                "run supplier-sync first"
+            )
+        return self.decrypt(row["ciphertext"]), self.store.clock() - row["fetched_at"], row["key_hash"]
+
+    def cooldown_until(self, provider: str = "canboso",
+                       db: sqlite3.Connection | None = None) -> float:
         if db is None:
             with self.store.connection() as conn:
-                return self.cooldown_until(conn)
-        row = db.execute("SELECT value FROM metadata WHERE key='canboso_not_before'").fetchone()
+                return self.cooldown_until(provider, conn)
+        row = db.execute("SELECT value FROM metadata WHERE key=?", (f"{provider}_not_before",)).fetchone()
         return float(row[0]) if row else 0
 
-    def defer_network(self, seconds: int) -> None:
+    def defer_network(self, seconds: int, provider: str = "canboso") -> None:
         with self.store.transaction() as db:
-            until = max(self.cooldown_until(db), self.store.clock() + max(1, seconds))
-            db.execute("INSERT INTO metadata VALUES ('canboso_not_before',?) ON CONFLICT(key) "
-                       "DO UPDATE SET value=excluded.value", (str(until),))
+            until = max(self.cooldown_until(provider, db), self.store.clock() + max(1, seconds))
+            db.execute("INSERT INTO metadata VALUES (?,?) ON CONFLICT(key) "
+                       "DO UPDATE SET value=excluded.value", (f"{provider}_not_before", str(until)))
 
-    def _snapshot(self, db: sqlite3.Connection, name: str) -> tuple[dict, float]:
-        row = db.execute("SELECT * FROM supplier_cache WHERE name=?", (name,)).fetchone()
-        if not row or row["key_hash"] != self.settings.key_fingerprint:
+    def _snapshot(self, db: sqlite3.Connection, provider: str, kind: str) -> tuple[dict, float]:
+        row = db.execute("SELECT * FROM supplier_cache WHERE name=?",
+                         (self._cache_name(provider, kind),)).fetchone()
+        if not row or row["key_hash"] != self.settings_for(provider).key_fingerprint:
             raise ShopError("Supplier catalog/balance has not been synchronized for this buyer key")
         if not 0 <= self.store.clock() - row["fetched_at"] <= 120:
             raise ShopError("Supplier information is stale. Please try again after synchronization")
         return self.decrypt(row["ciphertext"]), row["fetched_at"]
 
     def _check_quote(self, db: sqlite3.Connection, spec: dict, *, exclude_order: str = "") -> None:
-        self.assert_enabled()
-        if self.cooldown_until(db) > self.store.clock():
+        provider = spec["provider"]
+        settings = self.settings_for(provider)
+        self.assert_enabled(provider)
+        if self.cooldown_until(provider, db) > self.store.clock():
             raise ShopError("Supplier rate limit or connectivity cooldown is active. Please try later")
-        products, _ = self._snapshot(db, "products")
-        balance, balance_time = self._snapshot(db, "balance")
+        products, _ = self._snapshot(db, provider, "products")
+        balance, balance_time = self._snapshot(db, provider, "balance")
         found = next((p for p in products.get("products", []) if p.get("productId") == spec["product_id"]), None)
         if not found or found.get("productType") != spec["product_type"]:
             raise ShopError("This supplier product is missing or its type changed")
@@ -166,20 +224,20 @@ class SupplierState:
             raise ShopError("The selected duration is not offered by the supplier")
         price = found.get("price", {})
         currency = spec["currency"]
-        if price.get("currency") != currency or balance.get("walletCurrency") != currency or self.settings.budget_currency != currency:
+        if price.get("currency") != currency or balance.get("walletCurrency") != currency or settings.budget_currency != currency:
             raise ShopError("Supplier wallet, budget and product currencies must match")
         try:
             current_price = money(price.get("amount"))
             cap = money(spec["max_cost"], positive=True)
             wallet = money(balance.get("balance"))
-            budget = money(self.settings.spend_budget, positive=True)
+            budget = money(settings.spend_budget, positive=True)
         except CanbosoError as exc:
             raise ShopError("Supplier pricing/balance is invalid; checkout is paused") from exc
         if current_price > cap:
             raise ShopError("Supplier price exceeds this product's approved preflight limit")
         intents = db.execute(
             "SELECT i.*,o.state AS order_state FROM supplier_intents i JOIN orders o ON o.id=i.order_id "
-            "WHERE i.order_id<>?", (exclude_order,),
+            "WHERE i.order_id<>? AND i.provider=?", (exclude_order, provider),
         ).fetchall()
         budget_used, wallet_held, units_held = Decimal(0), Decimal(0), 0
         for row in intents:
@@ -213,31 +271,30 @@ class SupplierState:
 
     def prepare(self, db: sqlite3.Connection, order_id: str, sku: str, email: str | None) -> None:
         spec = self.mapping(sku, db)
+        provider = spec["provider"]
+        settings = self.settings_for(provider)
         self._check_quote(db, spec)
-        body = {"key": self.settings.api_key, "product_id": spec["product_id"], "quantity": 1}
-        if spec["product_type"] == "slot":
-            try:
-                body["customer_email"] = valid_email(email)
-            except CanbosoError as exc:
-                raise ShopError("Enter a valid customer email for this slot") from exc
-            if "slot_months" in spec:
-                body["slot_months"] = spec["slot_months"]
-        elif email:
-            raise ShopError("Email is not required for this product")
+        body = providers.build_request(spec, settings, email)
         now = self.store.clock()
         db.execute(
-            "INSERT INTO supplier_intents(order_id,idempotency_key,request_ciphertext,key_hash,product_id,"
-            "product_type,max_cost,currency,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (order_id, "ds-" + order_id, self.encrypt(body), self.settings.key_fingerprint,
-             spec["product_id"], spec["product_type"], spec["max_cost"], spec["currency"], now, now),
+            "INSERT INTO supplier_intents(order_id,idempotency_key,request_ciphertext,key_hash,"
+            "provider,product_id,"
+            "product_type,max_cost,currency,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (order_id, "ds-" + order_id, self.encrypt(body), settings.key_fingerprint,
+             provider, spec["product_id"],
+             spec["product_type"], spec["max_cost"], spec["currency"], now, now),
         )
 
     def checkout(self, db: sqlite3.Connection, order_id: str) -> None:
         row = db.execute("SELECT * FROM supplier_intents WHERE order_id=?", (order_id,)).fetchone()
-        if not row or row["key_hash"] != self.settings.key_fingerprint:
+        if not row:
+            raise ShopError("Supplier order not found")
+        provider = row["provider"]
+        if row["key_hash"] != self.settings_for(provider).key_fingerprint:
             raise ShopError("Supplier configuration changed; start a new checkout")
         body = self.decrypt(row["request_ciphertext"])
-        spec = {"product_id": row["product_id"], "product_type": row["product_type"],
+        spec = {"provider": provider, "product_id": row["product_id"],
+                "product_type": row["product_type"],
                 "currency": row["currency"], "max_cost": row["max_cost"]}
         if "slot_months" in body:
             spec["slot_months"] = body["slot_months"]
@@ -291,44 +348,48 @@ class SupplierState:
                 raise ShopError("Supplier order not found")
             request = self.decrypt(row["request_ciphertext"])
             request.pop("key", None)
-            return {"order_id": order_id, "state": row["state"], "request": request,
+            return {"order_id": order_id, "state": row["state"], "provider": row["provider"],
+                    "request": request,
                     "idempotency_key": row["idempotency_key"], "attempts": row["attempts"],
                     "supplier_reference": row["supplier_reference"], "hold_reason": row["hold_reason"],
                     "response": self.decrypt(row["response_ciphertext"]) if row["response_ciphertext"] else None}
 
     def claim(self) -> dict | None:
-        self.assert_enabled()
         with self.store.transaction() as db:
             now = self.store.clock()
             # A crash after request transmission is ambiguous. It must not cause
             # an automatic replay after an undocumented idempotency-retention period.
             db.execute("UPDATE supplier_intents SET state='uncertain',hold_reason='process_interrupted',"
                        "updated_at=? WHERE state='processing' AND lease_until<=?", (now, now))
-            if self.cooldown_until(db) > now:
-                return None
-            row = db.execute("SELECT i.* FROM supplier_intents i JOIN orders o ON o.id=i.order_id "
-                             "WHERE i.state IN ('queued','retry_wait','retry_approved') AND i.next_attempt_at<=? "
-                             "AND o.state='paid' ORDER BY i.created_at LIMIT 1", (now,)).fetchone()
-            if not row:
-                return None
-            if row["key_hash"] != self.settings.key_fingerprint:
-                db.execute("UPDATE supplier_intents SET state='uncertain',hold_reason='buyer_key_changed' "
-                           "WHERE order_id=?", (row["order_id"],))
-                return None
-            try:
-                # Approval never bypasses the current budget, price or wallet checks.
-                self.checkout(db, row["order_id"])
-            except ShopError:
-                db.execute("UPDATE supplier_intents SET state=CASE WHEN attempts>0 THEN 'uncertain' ELSE 'blocked' END,"
-                           "hold_reason='preflight_blocked',budget_held=CASE WHEN attempts>0 THEN 1 ELSE 0 END,"
-                           "updated_at=? WHERE order_id=?", (now, row["order_id"]))
-                return None
-            db.execute("UPDATE supplier_intents SET state='processing',attempts=attempts+1,"
-                       "budget_held=1,first_sent_at=coalesce(first_sent_at,?),lease_until=?,updated_at=? "
-                       "WHERE order_id=?", (now, now + 180, now, row["order_id"]))
-            result = dict(row)
-            result["body"] = self.decrypt(row["request_ciphertext"])
-            return result
+            rows = db.execute("SELECT i.* FROM supplier_intents i JOIN orders o ON o.id=i.order_id "
+                              "WHERE i.state IN ('queued','retry_wait','retry_approved') AND i.next_attempt_at<=? "
+                              "AND o.state='paid' ORDER BY i.created_at LIMIT 10", (now,)).fetchall()
+            for row in rows:
+                provider = row["provider"]
+                settings = self.settings_for(provider)
+                if self.cooldown_until(provider, db) > now:
+                    continue
+                if not settings.enabled:
+                    continue
+                if row["key_hash"] != settings.key_fingerprint:
+                    db.execute("UPDATE supplier_intents SET state='uncertain',hold_reason='buyer_key_changed' "
+                               "WHERE order_id=?", (row["order_id"],))
+                    continue
+                try:
+                    # Approval never bypasses the current budget, price or wallet checks.
+                    self.checkout(db, row["order_id"])
+                except ShopError:
+                    db.execute("UPDATE supplier_intents SET state=CASE WHEN attempts>0 THEN 'uncertain' ELSE 'blocked' END,"
+                               "hold_reason='preflight_blocked',budget_held=CASE WHEN attempts>0 THEN 1 ELSE 0 END,"
+                               "updated_at=? WHERE order_id=?", (now, row["order_id"]))
+                    continue
+                db.execute("UPDATE supplier_intents SET state='processing',attempts=attempts+1,"
+                           "budget_held=1,first_sent_at=coalesce(first_sent_at,?),lease_until=?,updated_at=? "
+                           "WHERE order_id=?", (now, now + 180, now, row["order_id"]))
+                result = dict(row)
+                result["body"] = self.decrypt(row["request_ciphertext"])
+                return result
+            return None
 
     def finish(self, order_id: str, result: PurchaseResult) -> None:
         with self.store.transaction() as db:
@@ -341,7 +402,8 @@ class SupplierState:
             hold = None
             if result.currency != row["currency"] or result.amount > money(row["max_cost"]):
                 hold = "supplier_price_or_currency_changed"
-            if result.raw.get("order", {}).get("productType") != row["product_type"]:
+            result_type = result.product_type or (result.raw.get("order", {}) or {}).get("productType")
+            if result_type != row["product_type"]:
                 hold = "supplier_product_type_mismatch"
             if row["order_state"] != "paid":
                 hold = "customer_payment_no_longer_payable"
@@ -351,14 +413,15 @@ class SupplierState:
                        (state, self.encrypt(result.raw), self.encrypt(result.payload), result.reference,
                         str(result.amount), hold, self.store.clock(), order_id))
             if state == "completed":
-                self._allocate_delivery(db, order_id, result.payload)
+                self._allocate_delivery(db, order_id, result.payload, row["provider"])
             else:
                 db.execute("UPDATE orders SET error_code=? WHERE id=? AND state='paid'",
                            ("supplier_" + state, order_id))
 
-    def _allocate_delivery(self, db: sqlite3.Connection, order_id: str, payload: str) -> None:
+    def _allocate_delivery(self, db: sqlite3.Connection, order_id: str, payload: str,
+                           provider: str = "canboso") -> None:
         order = db.execute("SELECT sku FROM orders WHERE id=?", (order_id,)).fetchone()
-        digest = hashlib.sha256(("canboso-delivery:" + order_id).encode()).hexdigest()
+        digest = hashlib.sha256((provider + "-delivery:" + order_id).encode()).hexdigest()
         db.execute("INSERT OR IGNORE INTO stock(sku,fingerprint,ciphertext,state,order_id,created_at) "
                    "VALUES (?,?,?,'sold',?,?)", (order["sku"], digest,
                    self.store.cipher.encrypt(payload.encode()).decode(), order_id, self.store.clock()))
@@ -400,7 +463,7 @@ class SupplierState:
     def review(self) -> list[dict]:
         with self.store.connection() as db:
             return [dict(r) for r in db.execute(
-                "SELECT i.order_id,i.state,i.supplier_reference,i.hold_reason,i.resolution_version,o.user_id "
+                "SELECT i.order_id,i.provider,i.state,i.supplier_reference,i.hold_reason,i.resolution_version,o.user_id "
                 "FROM supplier_intents i JOIN orders o ON o.id=i.order_id WHERE i.state IN "
                 "('pending','uncertain','blocked','failed','retry_wait') OR i.hold_reason='external_customer_refund' "
                 "ORDER BY i.created_at LIMIT 20")]
@@ -416,9 +479,10 @@ class SupplierState:
                              "WHERE i.order_id=?", (order_id,)).fetchone()
             if not row or row["state"] not in {"blocked", "failed", "uncertain", "pending"} or row["order_state"] != "paid":
                 raise ShopError("This supplier order cannot be manually resolved in its current state")
+            provider = row["provider"]
             if action == "retry_same_request":
-                self.assert_enabled()
-                if row["state"] == "pending" or row["key_hash"] != self.settings.key_fingerprint:
+                self.assert_enabled(provider)
+                if row["state"] == "pending" or row["key_hash"] != self.settings_for(provider).key_fingerprint:
                     raise ShopError("Do not retry an accepted pending order or change the buyer key")
                 # Record approval offline, even during a cooldown. Claim always
                 # rechecks fresh pricing, wallet and budget before sending POST.
@@ -429,7 +493,7 @@ class SupplierState:
             else:
                 if not isinstance(delivery, str) or not 1 <= len(delivery.encode()) <= 1_000_000:
                     raise ShopError("Verified fulfillment needs a non-empty delivery text file (max 1 MB)")
-                self._allocate_delivery(db, order_id, delivery)
+                self._allocate_delivery(db, order_id, delivery, provider)
                 new_state = "completed"
             db.execute("UPDATE supplier_intents SET state=?,next_attempt_at=0,resolution_version=resolution_version+1,"
                        "hold_reason='operator_verified',updated_at=? WHERE order_id=?",
